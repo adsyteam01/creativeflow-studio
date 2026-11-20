@@ -463,6 +463,33 @@ const [newContentType, setNewContentType] = useState("");
   const editors = useMemo(() => teamUsers.filter((u) => u.role === "Video Editor"), [teamUsers]);
   const selectedOrder = useMemo(() => orders.find((o) => o.docId === selectedOrderId) || null, [orders, selectedOrderId]);
 
+  const [pendingDeleteOrder, setPendingDeleteOrder] = useState(null);
+  const isBrandManager = String(currentUser?.role || "").trim().toLowerCase() === "brand manager";
+
+  const handleDeleteVideoOrder = (targetOrder) => {
+    const ord = targetOrder || selectedOrder;
+    if (!isBrandManager || !ord) return;
+    setPendingDeleteOrder(ord);
+  };
+
+  const confirmDeleteVideoOrder = async () => {
+    const ord = pendingDeleteOrder;
+    if (!isBrandManager || !ord) return;
+
+    setIsDeletingOrder(true);
+    try {
+      if (ord.docId) {
+        await deleteDoc(doc(db, "orders", ord.docId));
+      }
+      setPendingDeleteOrder(null);
+      setSelectedOrderId(null);
+    } catch (err) {
+      console.error("Gagal menghapus orderan video:", err);
+    } finally {
+      setIsDeletingOrder(false);
+    }
+  };
+
   const openOrderDetail = (order) => {
     setSelectedOrderId(order.docId);
     setShowEditorSubmitTab(false);
@@ -812,7 +839,6 @@ const [newContentType, setNewContentType] = useState("");
     }
   };
 
-  const isBrandManager = currentUser?.role === "Brand Manager";
 
   const handleApproveComplete = async () => {
     if (!selectedOrder) return;
@@ -1010,6 +1036,7 @@ const [newContentType, setNewContentType] = useState("");
   }
 
   return (
+    <>
     <div className="min-h-screen bg-slate-50 text-slate-800" style={{ backgroundImage: "linear-gradient(135deg, rgba(186, 230, 253, 0.45) 0%, rgba(240, 249, 255, 0.75) 50%, rgba(253, 230, 138, 0.42) 100%)" }}>
       <header className="sticky top-0 z-30 bg-white/95 border-b border-sky-100">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-3">
@@ -2077,5 +2104,49 @@ const [newContentType, setNewContentType] = useState("");
         </div>
       )}
     </div>
+      {pendingDeleteOrder && (
+        <div className="fixed inset-0 z-[70] bg-slate-900/60 backdrop-blur-[1px] flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-rose-200 shadow-2xl max-w-md w-full p-6 space-y-4">
+            <div className="space-y-1.5">
+              <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-50 text-rose-700 border border-rose-200 text-xs font-bold">
+                Peringatan Penghapusan Orderan
+              </div>
+              <h3 className="text-lg font-bold text-slate-900">
+                Hapus Orderan Video?
+              </h3>
+              <p className="text-sm text-slate-600 leading-relaxed">
+                Orderan video{" "}
+                <span className="font-bold text-slate-900">
+                  {pendingDeleteOrder.id ? `${pendingDeleteOrder.id} - ` : ""}
+                  {pendingDeleteOrder.title || "tanpa judul"}
+                </span>{" "}
+                akan dihapus secara permanen dan tidak dapat dikembalikan. Apakah Anda yakin ingin melanjutkan?
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={isDeletingOrder}
+                onClick={() => setPendingDeleteOrder(null)}
+                className="px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold transition cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingOrder}
+                onClick={confirmDeleteVideoOrder}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 text-white text-xs font-bold transition cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                {isDeletingOrder ? "Menghapus..." : "Ya, Hapus Orderan"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+
   );
 }
