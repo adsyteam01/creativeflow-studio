@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { Plus, Search, Clock, AlertCircle, Play, Pause, Volume2, VolumeX, Download, Bell, Film, LogOut, X, Smartphone, ChevronRight, Database, CheckCircle2, RotateCcw, Send, Wrench, Eye, EyeOff } from "lucide-react";
+import { Plus, Search, Clock, AlertCircle, Play, Pause, Volume2, VolumeX, Download, Bell, Film, LogOut, X, Smartphone, ChevronRight, Database, CheckCircle2, RotateCcw, Send, Wrench, Eye, EyeOff, Trash2 } from "lucide-react";
 import { auth, db } from "./firebase";
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, onAuthStateChanged, signOut } from "firebase/auth";
 import { collection, doc, setDoc, addDoc, updateDoc, onSnapshot, query, orderBy, serverTimestamp, getDoc, deleteDoc } from "firebase/firestore";
