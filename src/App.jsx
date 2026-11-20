@@ -247,8 +247,14 @@ export default function App() {
   "No Face",
   "Story Talling Gudang"
 ];
-const [newContentType, setNewContentType] = useState("Soft Selling / UGC");
+
+const sanitizeContentTypes = (list) =>
+  (Array.isArray(list) ? list : []).filter(
+    (item) => typeof item === "string" && !item.toLowerCase().includes("soft selling")
+  );
+const [newContentType, setNewContentType] = useState("");
   const [tiktokAccounts, setTiktokAccounts] = useState(() => {
+  const [isTiktokDropdownOpen, setIsTiktokDropdownOpen] = useState(false);
     try {
       const saved = JSON.parse(localStorage.getItem("cf_tiktok_accounts") || "[]");
       return Array.isArray(saved) ? saved : [];
@@ -305,10 +311,11 @@ const [newContentType, setNewContentType] = useState("Soft Selling / UGC");
       item.accountName.toLowerCase() === (newBrand || "").trim().toLowerCase() ||
       item.brandName.toLowerCase() === (newBrand || "").trim().toLowerCase()
   );
-  const availableContentTypes =
+  const availableContentTypes = sanitizeContentTypes(
     matchedTiktokAccount && Array.isArray(matchedTiktokAccount.contentTypes) && matchedTiktokAccount.contentTypes.length > 0
       ? matchedTiktokAccount.contentTypes
-      : TIKTOK_CONTENT_TYPES;
+      : TIKTOK_CONTENT_TYPES
+  );
   const [newDeadline, setNewDeadline] = useState("2026-11-25");
   const [newPriority, setNewPriority] = useState("Normal");
   const [newBrief, setNewBrief] = useState("");
@@ -527,7 +534,7 @@ const [newContentType, setNewContentType] = useState("Soft Selling / UGC");
       id: orderCode,
       title: newTitle.trim(),
       brand: newBrand.trim(),
-        contentType: (newContentType || "Soft Selling / UGC").trim(),
+        contentType: (newContentType || "").trim(),
       platform: "TikTok",
       platform: "TikTok",
       aspectRatio: "9:16",
@@ -933,31 +940,77 @@ const [newContentType, setNewContentType] = useState("Soft Selling / UGC");
             </div>
             <form onSubmit={handleCreateOrder} className="space-y-3.5">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div>
+                <div className="relative">
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Akun Tiktok</label>
-                  <input
-                    list="daftar-akun-tiktok"
-                    type="text"
-                    required
-                    value={newBrand}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setNewBrand(val);
-                      const found = tiktokAccounts.find(
-                        (acc) => acc.accountName.toLowerCase() === val.trim().toLowerCase()
-                      );
-                      if (found && found.contentTypes?.length > 0 && !found.contentTypes.includes(newContentType)) {
-                        setNewContentType(found.contentTypes[0]);
-                      }
-                    }}
-                    placeholder="Contoh: @primagold.id"
-                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm"
-                  />
-                  <datalist id="daftar-akun-tiktok">
-                    {tiktokAccounts.map((acc) => (
-                      <option key={acc.id} value={acc.accountName}>{acc.accountName} ({acc.brandName})</option>
-                    ))}
-                  </datalist>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      required
+                      value={newBrand}
+                      onFocus={() => setIsTiktokDropdownOpen(true)}
+                      onBlur={() => setTimeout(() => setIsTiktokDropdownOpen(false), 160)}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setNewBrand(val);
+                        setIsTiktokDropdownOpen(true);
+                        const found = tiktokAccounts.find(
+                          (acc) =>
+                            acc.accountName.toLowerCase() === val.trim().toLowerCase() ||
+                            acc.brandName.toLowerCase() === val.trim().toLowerCase()
+                        );
+                        if (found) {
+                          const cleanTypes = sanitizeContentTypes(found.contentTypes);
+                          if (cleanTypes.length > 0) {
+                            setNewContentType(cleanTypes[0]);
+                          }
+                        }
+                      }}
+                      placeholder="Pilih atau ketik @akun / brand..."
+                      autoComplete="off"
+                      className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/15 transition text-sm bg-white"
+                    />
+                  </div>
+                  {isTiktokDropdownOpen && (
+                    <div className="absolute left-0 right-0 mt-1.5 z-30 max-h-56 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-lg py-1 transition-all duration-150">
+                      {tiktokAccounts
+                        .filter((acc) => {
+                          const q = (newBrand || "").trim().toLowerCase();
+                          if (!q) return true;
+                          return (
+                            acc.brandName.toLowerCase().includes(q) ||
+                            acc.accountName.toLowerCase().includes(q)
+                          );
+                        })
+                        .map((acc) => {
+                          const cleanTypes = sanitizeContentTypes(acc.contentTypes);
+                          return (
+                            <button
+                              key={acc.id}
+                              type="button"
+                              onMouseDown={(e) => {
+                                e.preventDefault();
+                                setNewBrand(acc.accountName);
+                                setNewContentType(cleanTypes[0] || "");
+                                setIsTiktokDropdownOpen(false);
+                              }}
+                              className="w-full text-left px-3.5 py-2 hover:bg-sky-50/80 transition flex flex-col cursor-pointer border-b border-slate-50 last:border-b-0"
+                            >
+                              <span className="text-xs font-bold text-slate-900 leading-tight">
+                                {acc.brandName}
+                              </span>
+                              <span className="text-[11px] font-medium text-sky-700 leading-tight mt-0.5">
+                                {acc.accountName}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      {tiktokAccounts.length === 0 && (
+                        <div className="px-3.5 py-2.5 text-xs text-slate-500">
+                          Belum ada akun TikTok. Klik "+ Tambah Akun TikTok".
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Platform</label>
@@ -967,10 +1020,18 @@ const [newContentType, setNewContentType] = useState("Soft Selling / UGC");
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Jenis konten</label>
-                  <input list="jenis-konten-list" type="text" required value={newContentType} onChange={(e) => setNewContentType(e.target.value)} placeholder="Pilih / ketik jenis konten" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white" />
-                  <datalist id="jenis-konten-list">
-                    {availableContentTypes.map((ct) => <option key={ct} value={ct} />)}
-                  </datalist>
+                  <select
+                    required
+                    value={availableContentTypes.includes(newContentType) ? newContentType : (availableContentTypes[0] || "")}
+                    onChange={(e) => setNewContentType(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/15 transition text-sm bg-white text-slate-800"
+                  >
+                    {availableContentTypes.map((ct) => (
+                      <option key={ct} value={ct}>
+                        {ct}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
               <div>
