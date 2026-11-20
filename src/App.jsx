@@ -238,6 +238,7 @@ export default function App() {
   const [newTitle, setNewTitle] = useState("");
   const [newBrand, setNewBrand] = useState("");
   const [newPlatform, setNewPlatform] = useState("TikTok");
+  const [newContentType, setNewContentType] = useState("Soft Selling / UGC");
   const [newDeadline, setNewDeadline] = useState("2026-11-25");
   const [newPriority, setNewPriority] = useState("Normal");
   const [newBrief, setNewBrief] = useState("");
@@ -455,7 +456,9 @@ export default function App() {
       id: orderCode,
       title: newTitle.trim(),
       brand: newBrand.trim(),
-      platform: newPlatform,
+        contentType: (newContentType || "Soft Selling / UGC").trim(),
+      platform: "TikTok",
+      platform: "TikTok",
       aspectRatio: "9:16",
       deadline: newDeadline,
       priority: newPriority,
@@ -847,16 +850,27 @@ export default function App() {
               <button type="button" onClick={() => setIsNewOrderOpen(false)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"><X className="w-4 h-4" /></button>
             </div>
             <form onSubmit={handleCreateOrder} className="space-y-3.5">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Brand</label>
-                  <input type="text" required value={newBrand} onChange={(e) => setNewBrand(e.target.value)} placeholder="Contoh: PrimaGold" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Akun Tiktok</label>
+                  <input type="text" required value={newBrand} onChange={(e) => setNewBrand(e.target.value)} placeholder="Contoh: @primagold.id" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Platform</label>
-                  <select value={newPlatform} onChange={(e) => setNewPlatform(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white">
-                    {PLATFORMS.map((pl) => <option key={pl} value={pl}>{pl}</option>)}
+                  <select value="TikTok" onChange={() => setNewPlatform("TikTok")} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-slate-50 text-slate-800">
+                    <option value="TikTok">TikTok</option>
                   </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Jenis konten</label>
+                  <input list="jenis-konten-list" type="text" required value={newContentType} onChange={(e) => setNewContentType(e.target.value)} placeholder="Pilih / ketik jenis konten" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white" />
+                  <datalist id="jenis-konten-list">
+                    <option value="Soft Selling / UGC" />
+                    <option value="Hard Selling" />
+                    <option value="Drama / Story" />
+                    <option value="Edukasi / Tips" />
+                    <option value="Review Produk" />
+                  </datalist>
                 </div>
               </div>
               <div>
