@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import { Plus, Search, Clock, AlertCircle, Play, Pause, Volume2, VolumeX, Download, Bell, Film, LogOut, X, Smartphone, ChevronRight, Database, CheckCircle2, RotateCcw, Send, Wrench, Eye, EyeOff } from "lucide-react";
 import { auth, db } from "./firebase";
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, onAuthStateChanged, signOut } from "firebase/auth";
-import {collection, doc, setDoc, addDoc, updateDoc, onSnapshot, query, orderBy, serverTimestamp, getDoc, deleteDoc} from "firebase/firestore";
+import { collection, doc, setDoc, addDoc, updateDoc, onSnapshot, query, orderBy, serverTimestamp, getDoc, deleteDoc } from "firebase/firestore";
 
 const BRAND_LOGO_URL = "/Logo_3.jpeg";
 const ROLES = ["Brand Manager", "Video Editor"];
@@ -271,6 +271,7 @@ const [newContentType, setNewContentType] = useState("");
   const [isSavingTtEdit, setIsSavingTtEdit] = useState(false);
   const [isDeletingTtAccount, setIsDeletingTtAccount] = useState(false);
   const [postingOrderDocId, setPostingOrderDocId] = useState(null);
+  const [isDeletingOrder, setIsDeletingOrder] = useState(false);
   const [accountSearchQuery, setAccountSearchQuery] = useState("");
   const [accountStatusFilter, setAccountStatusFilter] = useState("Semua");
   const [accountPlatformFilter, setAccountPlatformFilter] = useState("Semua");
@@ -1126,7 +1127,7 @@ const [newContentType, setNewContentType] = useState("");
                             {account.brandName || "-"}
                           </span>
                           <span className="text-[11px] text-slate-400 shrink-0">
-                            {accountOrders.length} konten
+                            {readyToPostCount} video siap posting
                           </span>
                         </div>
 
@@ -1174,58 +1175,7 @@ const [newContentType, setNewContentType] = useState("");
             )}
           </section>
 
-        <div className="bg-white p-4 rounded-2xl border border-slate-200/80 flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
-          <div className="relative flex-1">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-            <input type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Cari ID order, judul konten, atau brand..." className="w-full pl-9 pr-3.5 py-2 rounded-xl border border-slate-200 text-sm" />
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-semibold bg-white text-slate-700">
-              <option value="Semua">Semua Status</option>
-              {Object.keys(STATUS_CONFIG).map((st) => <option key={st} value={st}>{st}</option>)}
-            </select>
-            <select value={platformFilter} onChange={(e) => setPlatformFilter(e.target.value)} className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-semibold bg-white text-slate-700">
-              <option value="Semua">Semua Platform</option>
-              {PLATFORMS.map((pl) => <option key={pl} value={pl}>{pl}</option>)}
-            </select>
-          </div>
-        </div>
-
-        {(filteredOrders?.length ?? 0) === 0 ? (
-          <div className="bg-white rounded-2xl border border-dashed border-sky-200 p-10 text-center space-y-2" style={{ backgroundImage: "linear-gradient(145deg, rgba(255, 255, 255, 0.92) 0%, rgba(240, 249, 255, 0.35) 58%, rgba(254, 243, 199, 0.38) 100%)" }}>
-            <p className="text-sm font-bold text-slate-800">Belum ada order video di antrean</p>
-            <p className="text-xs text-slate-500">Klik tombol "Buat Order Video" untuk menambahkan order pertama.</p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {filteredOrders.map((order) => {
-              const st = STATUS_CONFIG[order.status] || STATUS_CONFIG["Antrean"];
-              return (
-                <div key={order.docId} onClick={() => openOrderDetail(order)} className="bg-white rounded-2xl border border-slate-200/90 hover:border-sky-400 p-5 hover:shadow-md transition flex flex-col justify-between gap-4 cursor-pointer">
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs font-bold text-sky-700 bg-sky-50 px-2.5 py-1 rounded-lg border border-sky-100">{order.id} • {order.brand}</span>
-                      <span className={"inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full border " + st.badgeClass}>
-                        <span className={"w-1.5 h-1.5 rounded-full " + st.dotClass} />{st.label}
-                      </span>
-                    </div>
-                    <div>
-                      <h3 className="font-bold text-slate-900 text-base leading-snug">{order.title}</h3>
-                      <p className="text-xs text-slate-500 mt-1 line-clamp-2">{order.brief}</p>
-                    </div>
-                  </div>
-                  <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
-                    <div className="flex items-center gap-2">
-                      <span className="px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200 font-semibold">{order.platform} (9:16)</span>
-                      <span className="flex items-center gap-1 text-slate-500"><Clock className="w-3.5 h-3.5" />{order.deadline}</span>
-                    </div>
-                    <span className="inline-flex items-center gap-1 font-semibold text-sky-700">Detail <ChevronRight className="w-3.5 h-3.5" /></span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
+        
       </main>
 
       {isNewOrderOpen && (
@@ -1583,6 +1533,20 @@ const [newContentType, setNewContentType] = useState("");
                       </div>
                     )}
 
+                    {isBrandManager && (
+                      <div className="pt-4 border-t border-slate-200 flex items-center justify-end">
+                        <button
+                          type="button"
+                          disabled={isDeletingOrder}
+                          onClick={() => handleDeleteVideoOrder(selectedOrder)}
+                          className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 text-white text-xs font-bold transition cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          {isDeletingOrder ? "Menghapus Orderan..." : "Hapus Orderan"}
+                        </button>
+                      </div>
+                    )}
+
                     {selectedOrder.status !== "Review" && (
                       <p className="text-[11px] text-slate-500">
                         Tombol <span className="font-semibold">Revisi</span> dan <span className="font-semibold">Selesai</span> hanya aktif setelah editor mengirim hasil video (status <span className="font-semibold text-indigo-700">Review</span>).
@@ -1762,6 +1726,18 @@ const [newContentType, setNewContentType] = useState("");
                 {tiktokDrawerTab === "monitoring" || !isBrandManager ? (
                   <>
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="rounded-xl border border-slate-200 bg-white p-3.5">
+                        <div className="text-[11px] font-semibold text-slate-600 uppercase">
+                          Dalam Produksi
+                        </div>
+                        <div className="text-2xl font-bold text-slate-900 mt-0.5">
+                          {inProgressList.length}
+                        </div>
+                        <div className="text-[11px] text-slate-500">
+                          Antrean / Proses / Review / Revisi
+                        </div>
+                      </div>
+
                       <div className="rounded-xl border border-emerald-200 bg-white p-3.5">
                         <div className="text-[11px] font-semibold text-emerald-700 uppercase">
                           Siap Posting
@@ -1783,18 +1759,6 @@ const [newContentType, setNewContentType] = useState("");
                         </div>
                         <div className="text-[11px] text-slate-500">
                           Sudah ditandai terposting di Detail Order
-                        </div>
-                      </div>
-
-                      <div className="rounded-xl border border-slate-200 bg-white p-3.5">
-                        <div className="text-[11px] font-semibold text-slate-600 uppercase">
-                          Dalam Produksi
-                        </div>
-                        <div className="text-2xl font-bold text-slate-900 mt-0.5">
-                          {inProgressList.length}
-                        </div>
-                        <div className="text-[11px] text-slate-500">
-                          Antrean / Proses / Review / Revisi
                         </div>
                       </div>
                     </div>
