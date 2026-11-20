@@ -526,7 +526,7 @@ const [newContentType, setNewContentType] = useState("");
     e.preventDefault();
     if (!newTitle.trim() || !newBrand.trim() || !currentUser) return;
 
-    const orderCode = "ORD-" + String(orders.length + 1).padStart(3, "0");
+    const orderCode = "ORD-" + String((orders?.length ?? 0) + 1).padStart(3, "0");
     const assigned = newAssignedEditor || (editors[0] ? editors[0].name : "Belum Ditentukan");
     const nowText = new Date().toLocaleString("id-ID", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 
@@ -652,7 +652,7 @@ const [newContentType, setNewContentType] = useState("");
   }), [orders, searchQuery, statusFilter, platformFilter]);
 
   const stats = useMemo(() => ({
-    total: orders.length,
+    total: (orders?.length ?? 0),
     queue: orders.filter((o) => o.status === "Antrean").length,
     inProgress: orders.filter((o) => o.status === "Sedang Dikerjakan" || o.status === "Revisi").length,
     reviewDone: orders.filter((o) => o.status === "Review" || o.status === "Selesai").length,
@@ -894,7 +894,7 @@ const [newContentType, setNewContentType] = useState("");
           </div>
         </div>
 
-        {filteredOrders.length === 0 ? (
+        {(filteredOrders?.length ?? 0) === 0 ? (
           <div className="bg-white rounded-2xl border border-dashed border-sky-200 p-10 text-center space-y-2" style={{ backgroundImage: "linear-gradient(145deg, rgba(255, 255, 255, 0.92) 0%, rgba(240, 249, 255, 0.35) 58%, rgba(254, 243, 199, 0.38) 100%)" }}>
             <p className="text-sm font-bold text-slate-800">Belum ada order video di antrean</p>
             <p className="text-xs text-slate-500">Klik tombol "Buat Order Video" untuk menambahkan order pertama.</p>
@@ -1004,7 +1004,7 @@ const [newContentType, setNewContentType] = useState("");
                             </button>
                           );
                         })}
-                      {tiktokAccounts.length === 0 && (
+                      {(tiktokAccounts?.length ?? 0) === 0 && (
                         <div className="px-3.5 py-2.5 text-xs text-slate-500">
                           Belum ada akun TikTok. Klik "+ Tambah Akun TikTok".
                         </div>
