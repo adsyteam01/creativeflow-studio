@@ -943,43 +943,62 @@ const [newContentType, setNewContentType] = useState("");
                 <div className="relative">
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Akun Tiktok</label>
                   <div className="relative">
-                    <input
-                      type="text"
-                      required
-                      value={newBrand}
-                      onFocus={() => setIsTiktokDropdownOpen(true)}
-                      onBlur={() => setTimeout(() => setIsTiktokDropdownOpen(false), 160)}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setNewBrand(val);
-                        setIsTiktokDropdownOpen(true);
-                        const found = tiktokAccounts.find(
-                          (acc) =>
-                            acc.accountName.toLowerCase() === val.trim().toLowerCase() ||
-                            acc.brandName.toLowerCase() === val.trim().toLowerCase()
-                        );
-                        if (found) {
-                          const cleanTypes = sanitizeContentTypes(found.contentTypes);
-                          if ((cleanTypes?.length ?? 0) > 0) {
-                            setNewContentType(cleanTypes[0]);
+                    <div className="relative flex items-center">
+                      <input
+                        type="text"
+                        required
+                        value={newBrand}
+                        onClick={() => setIsTiktokDropdownOpen(true)}
+                        onFocus={() => setIsTiktokDropdownOpen(true)}
+                        onBlur={() => setTimeout(() => setIsTiktokDropdownOpen(false), 160)}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setNewBrand(val);
+                          setIsTiktokDropdownOpen(true);
+                          const found = (Array.isArray(tiktokAccounts) ? tiktokAccounts : []).find(
+                            (acc) =>
+                              String(acc?.accountName || "").toLowerCase() === val.trim().toLowerCase() ||
+                              String(acc?.brandName || "").toLowerCase() === val.trim().toLowerCase()
+                          );
+                          if (found) {
+                            const cleanTypes = sanitizeContentTypes(found.contentTypes);
+                            if ((cleanTypes?.length ?? 0) > 0) {
+                              setNewContentType(cleanTypes[0]);
+                            }
                           }
-                        }
-                      }}
-                      placeholder="Pilih atau ketik @akun / brand..."
-                      autoComplete="off"
-                      className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/15 transition text-sm bg-white"
-                    />
+                        }}
+                        placeholder="Pilih atau ketik @akun / brand..."
+                        autoComplete="off"
+                        className="w-full px-3 py-2 pr-14 rounded-xl border border-slate-200 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/15 transition text-sm bg-white"
+                      />
+                      {newBrand && (
+                        <button
+                          type="button"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            setNewBrand("");
+                            setNewContentType("");
+                            setIsTiktokDropdownOpen(true);
+                          }}
+                          title="Reset & tampilkan semua akun"
+                          className="absolute right-2 px-1.5 py-0.5 text-[11px] font-semibold text-slate-500 hover:text-slate-800 rounded bg-slate-100 hover:bg-slate-200 transition cursor-pointer"
+                        >
+                          Reset
+                        </button>
+                      )}
+                    </div>
                   </div>
                   {isTiktokDropdownOpen && (
                     <div className="absolute left-0 right-0 mt-1.5 z-30 max-h-56 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-lg py-1 transition-all duration-150">
-                      {tiktokAccounts
+                      {(Array.isArray(tiktokAccounts) ? tiktokAccounts : [])
                         .filter((acc) => {
                           const q = (newBrand || "").trim().toLowerCase();
                           if (!q) return true;
-                          return (
-                            acc.brandName.toLowerCase().includes(q) ||
-                            acc.accountName.toLowerCase().includes(q)
-                          );
+                          const bName = String(acc?.brandName || "").toLowerCase();
+                          const aName = String(acc?.accountName || "").toLowerCase();
+                          const isExactSelected = bName === q || aName === q;
+                          if (isExactSelected) return true;
+                          return bName.includes(q) || aName.includes(q);
                         })
                         .map((acc) => {
                           const cleanTypes = sanitizeContentTypes(acc.contentTypes);
