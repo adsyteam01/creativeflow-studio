@@ -281,11 +281,16 @@ const [newContentType, setNewContentType] = useState("");
     if (!cleanAccount.startsWith("@")) cleanAccount = "@" + cleanAccount;
 
     const cleanTypes = Array.isArray(ttSelectedTypes) ? ttSelectedTypes : [];
-    const createdAtMs = Date.now();
-    const fallbackId = "tt_" + createdAtMs;
+    const existingAccount = (Array.isArray(tiktokAccounts) ? tiktokAccounts : []).find(
+      (item) => String(item?.accountName || "").toLowerCase() === cleanAccount.toLowerCase()
+    );
 
-    const localItem = {
-      id: fallbackId,
+    const createdAtMs = existingAccount?.createdAtMs || Date.now();
+    const targetId = existingAccount?.id || ("tt_" + Date.now());
+    const hasFirestoreId = Boolean(existingAccount?.id && !String(existingAccount.id).startsWith("tt_"));
+
+    const nextItem = {
+      id: targetId,
       brandName: cleanBrand,
       accountName: cleanAccount,
       contentTypes: cleanTypes,
@@ -297,7 +302,7 @@ const [newContentType, setNewContentType] = useState("");
       const filtered = safePrev.filter(
         (item) => String(item?.accountName || "").toLowerCase() !== cleanAccount.toLowerCase()
       );
-      const updated = [localItem, ...filtered];
+      const updated = [nextItem, ...filtered];
       try {
         localStorage.setItem("cf_tiktok_accounts", JSON.stringify(updated));
       } catch {}
@@ -312,25 +317,34 @@ const [newContentType, setNewContentType] = useState("");
     setIsAddTiktokModalOpen(false);
 
     try {
-      const docRef = await addDoc(collection(db, "tiktokAccounts"), {
-        brandName: cleanBrand,
-        accountName: cleanAccount,
-        contentTypes: cleanTypes,
-        createdAtMs,
-        createdAt: serverTimestamp(),
-      });
-      setTiktokAccounts((prev) => {
-        const safePrev = Array.isArray(prev) ? prev : [];
-        const synced = safePrev.map((item) =>
-          item.id === fallbackId ? { ...item, id: docRef.id } : item
-        );
-        try {
-          localStorage.setItem("cf_tiktok_accounts", JSON.stringify(synced));
-        } catch {}
-        return synced;
-      });
+      if (hasFirestoreId) {
+        await updateDoc(doc(db, "tiktokAccounts", existingAccount.id), {
+          brandName: cleanBrand,
+          accountName: cleanAccount,
+          contentTypes: cleanTypes,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        const docRef = await addDoc(collection(db, "tiktokAccounts"), {
+          brandName: cleanBrand,
+          accountName: cleanAccount,
+          contentTypes: cleanTypes,
+          createdAtMs,
+          createdAt: serverTimestamp(),
+        });
+        setTiktokAccounts((prev) => {
+          const safePrev = Array.isArray(prev) ? prev : [];
+          const synced = safePrev.map((item) =>
+            item.id === targetId ? { ...item, id: docRef.id } : item
+          );
+          try {
+            localStorage.setItem("cf_tiktok_accounts", JSON.stringify(synced));
+          } catch {}
+          return synced;
+        });
+      }
     } catch (err) {
-      console.error("Gagal menyimpan akun TikTok ke Firestore:", err);
+      console.error("Gagal menyimpan/memperbarui akun TikTok ke Firestore:", err);
     }
   };
 
