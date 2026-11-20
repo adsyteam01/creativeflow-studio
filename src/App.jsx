@@ -1853,9 +1853,10 @@ const [newContentType, setNewContentType] = useState("");
                           return (
                             <div
                               key={ord.docId || ord.id}
-                              onClick={() => {
-                                setSelectedOrder(ord);
+                              onClick={(e) => {
+                                e.stopPropagation();
                                 setActiveTiktokAccountId(null);
+                                openOrderDetail(ord);
                               }}
                               className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-sky-400 transition flex flex-col justify-between gap-4 cursor-pointer"
                             >
