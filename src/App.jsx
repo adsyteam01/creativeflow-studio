@@ -273,25 +273,31 @@ const [newContentType, setNewContentType] = useState("");
     );
   };
 
-  const handleSaveTiktokAccount = (e) => {
+  const handleSaveTiktokAccount = async (e) => {
     e.preventDefault();
     const cleanBrand = ttBrandName.trim();
     let cleanAccount = ttAccountName.trim();
     if (!cleanBrand || !cleanAccount || (Array.isArray(ttSelectedTypes) ? ttSelectedTypes.length : 0) === 0) return;
     if (!cleanAccount.startsWith("@")) cleanAccount = "@" + cleanAccount;
 
-    const newItem = {
-      id: "tt_" + Date.now(),
+    const cleanTypes = Array.isArray(ttSelectedTypes) ? ttSelectedTypes : [];
+    const createdAtMs = Date.now();
+    const fallbackId = "tt_" + createdAtMs;
+
+    const localItem = {
+      id: fallbackId,
       brandName: cleanBrand,
       accountName: cleanAccount,
-      contentTypes: ttSelectedTypes
+      contentTypes: cleanTypes,
+      createdAtMs,
     };
 
     setTiktokAccounts((prev) => {
-      const filtered = prev.filter(
-        (item) => item.accountName.toLowerCase() !== cleanAccount.toLowerCase()
+      const safePrev = Array.isArray(prev) ? prev : [];
+      const filtered = safePrev.filter(
+        (item) => String(item?.accountName || "").toLowerCase() !== cleanAccount.toLowerCase()
       );
-      const updated = [newItem, ...filtered];
+      const updated = [localItem, ...filtered];
       try {
         localStorage.setItem("cf_tiktok_accounts", JSON.stringify(updated));
       } catch {}
@@ -299,14 +305,36 @@ const [newContentType, setNewContentType] = useState("");
     });
 
     setNewBrand(cleanAccount);
-    setNewContentType(ttSelectedTypes[0] || "");
+    setNewContentType(cleanTypes[0] || "");
     setTtBrandName("");
     setTtAccountName("");
     setTtSelectedTypes([]);
     setIsAddTiktokModalOpen(false);
+
+    try {
+      const docRef = await addDoc(collection(db, "tiktokAccounts"), {
+        brandName: cleanBrand,
+        accountName: cleanAccount,
+        contentTypes: cleanTypes,
+        createdAtMs,
+        createdAt: serverTimestamp(),
+      });
+      setTiktokAccounts((prev) => {
+        const safePrev = Array.isArray(prev) ? prev : [];
+        const synced = safePrev.map((item) =>
+          item.id === fallbackId ? { ...item, id: docRef.id } : item
+        );
+        try {
+          localStorage.setItem("cf_tiktok_accounts", JSON.stringify(synced));
+        } catch {}
+        return synced;
+      });
+    } catch (err) {
+      console.error("Gagal menyimpan akun TikTok ke Firestore:", err);
+    }
   };
 
-  const matchedTiktokAccount = tiktokAccounts.find(
+  const matchedTiktokAccount = (Array.isArray(tiktokAccounts) ? tiktokAccounts : []).find(
     (item) =>
       item.accountName.toLowerCase() === (newBrand || "").trim().toLowerCase() ||
       item.brandName.toLowerCase() === (newBrand || "").trim().toLowerCase()
