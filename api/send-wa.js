@@ -15,7 +15,12 @@ export default async function handler(req, res) {
 
   // Normalisasi nomor WA ke format internasional tanpa '+' (contoh: 6281234567890)
   const normalizedTargets = recipients
-    .map((num) => String(num || "").replace(/[^\d]/g, ""))
+    .map((item) => {
+      if (typeof item === "string" || typeof item === "number") return String(item);
+      if (item && typeof item === "object") return String(item.phone || item.whatsapp || item.target || "");
+      return "";
+    })
+    .map((num) => num.replace(/[^\d]/g, ""))
     .map((digits) => {
       if (digits.startsWith("0")) return "62" + digits.slice(1);
       if (digits.startsWith("8")) return "62" + digits;

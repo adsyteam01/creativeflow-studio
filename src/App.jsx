@@ -340,19 +340,24 @@ export default function App() {
       });
     }
 
-    if (waWebhookUrl.trim()) {
-      try {
-        await fetch(waWebhookUrl.trim(), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            source: "CreativeFlow Studio",
-            event: eventLabel,
-            message: messageText,
-            recipients: validRecipients.map((r) => ({ name: r.name, role: r.role, phone: normalizeWhatsApp(r.whatsapp) })),
-          }),
-        });
-      } catch {}
+    const endpointUrl = (typeof waWebhookUrl === "string" ? waWebhookUrl.trim() : "") || "/api/send-wa";
+    try {
+      await fetch(endpointUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source: "CreativeFlow Studio",
+          event: eventLabel,
+          message: messageText,
+          recipients: validRecipients.map((r) => ({
+            name: r.name,
+            role: r.role,
+            phone: normalizeWhatsApp(r.whatsapp),
+          })),
+        }),
+      });
+    } catch (err) {
+      console.error("Gagal mengirim notifikasi WA:", err);
     }
   };
 
@@ -1087,9 +1092,8 @@ export default function App() {
               </div>
               <button type="submit" className="sm:self-end px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold cursor-pointer">Simpan ke Firestore</button>
             </form>
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Endpoint Webhook / Gateway WA (Opsional)</label>
-              <input type="url" value={waWebhookUrl} onChange={(e) => handleWebhookChange(e.target.value)} placeholder="https://domain-kamu.vercel.app/api/send-wa" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+            <div className="p-3 rounded-xl bg-emerald-50/80 border border-emerald-200/80 text-xs text-emerald-900">
+              Gateway WhatsApp otomatis terhubung ke nomor utama studio melalui <span className="font-mono font-semibold">/api/send-wa</span>. Anggota tim tidak perlu mengatur endpoint atau token sendiri.
             </div>
             <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
               <div className="text-xs font-bold text-slate-700">Riwayat Notifikasi WA (Tersimpan di Firestore)</div>
