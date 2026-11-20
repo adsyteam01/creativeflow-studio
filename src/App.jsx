@@ -312,7 +312,7 @@ const [newContentType, setNewContentType] = useState("");
       item.brandName.toLowerCase() === (newBrand || "").trim().toLowerCase()
   );
   const availableContentTypes = sanitizeContentTypes(
-    matchedTiktokAccount && Array.isArray(matchedTiktokAccount.contentTypes) && matchedTiktokAccount.contentTypes.length > 0
+    matchedTiktokAccount && Array.isArray(matchedTiktokAccount.contentTypes) && (matchedTiktokAccount.contentTypes?.length ?? 0) > 0
       ? matchedTiktokAccount.contentTypes
       : TIKTOK_CONTENT_TYPES
   );
@@ -417,7 +417,7 @@ const [newContentType, setNewContentType] = useState("");
 
   const triggerAutoWhatsApp = async ({ eventLabel, recipients, messageText }) => {
     const validRecipients = recipients.filter((r) => normalizeWhatsApp(r.whatsapp));
-    if (validRecipients.length === 0) return;
+    if ((validRecipients?.length ?? 0) === 0) return;
 
     const nowText = new Date().toLocaleString("id-ID", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
     const nowMs = Date.now();
@@ -492,11 +492,11 @@ const [newContentType, setNewContentType] = useState("");
     e.preventDefault();
     setAuthError("");
     const cleanPhone = normalizeWhatsApp(regWhatsapp);
-    if (!regName.trim() || !regEmail.trim() || regPassword.length < 6) {
+    if (!regName.trim() || !regEmail.trim() || (regPassword?.length ?? 0) < 6) {
       setAuthError("Nama, email, dan kata sandi (minimal 6 karakter) wajib diisi.");
       return;
     }
-    if (!cleanPhone || cleanPhone.length < 10) {
+    if (!cleanPhone || (cleanPhone?.length ?? 0) < 10) {
       setAuthError("Masukkan nomor WhatsApp aktif yang valid (contoh: 081234567890).");
       return;
     }
@@ -561,7 +561,7 @@ const [newContentType, setNewContentType] = useState("");
     const targetEditors = teamUsers.filter((u) => u.role === "Video Editor" && (!assigned || u.name === assigned));
     await triggerAutoWhatsApp({
       eventLabel: "Order Baru Masuk (Antrean)",
-      recipients: targetEditors.length > 0 ? targetEditors : editors,
+      recipients: (targetEditors?.length ?? 0) > 0 ? targetEditors : editors,
       messageText: "[CreativeFlow Studio] Order baru " + orderCode + " (" + newOrderData.brand + " - " + newOrderData.platform + " 9:16): \"" + newOrderData.title + "\" dari " + currentUser.name + " (" + currentUser.role + "). Deadline: " + newOrderData.deadline,
     });
   };
@@ -618,7 +618,7 @@ const [newContentType, setNewContentType] = useState("");
     );
     await triggerAutoWhatsApp({
       eventLabel: "Permintaan Revisi Order",
-      recipients: targetEditors.length > 0 ? targetEditors : editors,
+      recipients: (targetEditors?.length ?? 0) > 0 ? targetEditors : editors,
       messageText: "[CreativeFlow Studio] Order " + selectedOrder.id + " (" + selectedOrder.brand + ") \"" + selectedOrder.title + "\" perlu REVISI dari " + currentUser.name + (revisionNote.trim() ? ". Catatan: " + revisionNote.trim() : "."),
     });
   };
@@ -635,7 +635,7 @@ const [newContentType, setNewContentType] = useState("");
     e.preventDefault();
     if (!currentUser) return;
     const cleanPhone = normalizeWhatsApp(editWaNumber);
-    if (!cleanPhone || cleanPhone.length < 10) return;
+    if (!cleanPhone || (cleanPhone?.length ?? 0) < 10) return;
     await updateDoc(doc(db, "teamUsers", currentUser.id), { whatsapp: cleanPhone });
     setCurrentUser((prev) => ({ ...prev, whatsapp: cleanPhone }));
   };
@@ -960,7 +960,7 @@ const [newContentType, setNewContentType] = useState("");
                         );
                         if (found) {
                           const cleanTypes = sanitizeContentTypes(found.contentTypes);
-                          if (cleanTypes.length > 0) {
+                          if ((cleanTypes?.length ?? 0) > 0) {
                             setNewContentType(cleanTypes[0]);
                           }
                         }
