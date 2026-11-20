@@ -254,7 +254,6 @@ const sanitizeContentTypes = (list) =>
   );
 const [newContentType, setNewContentType] = useState("");
   const [tiktokAccounts, setTiktokAccounts] = useState(() => {
-  const [isTiktokDropdownOpen, setIsTiktokDropdownOpen] = useState(false);
     try {
       const saved = JSON.parse(localStorage.getItem("cf_tiktok_accounts") || "[]");
       return Array.isArray(saved) ? saved : [];
@@ -262,6 +261,7 @@ const [newContentType, setNewContentType] = useState("");
       return [];
     }
   });
+  const [isTiktokDropdownOpen, setIsTiktokDropdownOpen] = useState(false);
   const [isAddTiktokModalOpen, setIsAddTiktokModalOpen] = useState(false);
   const [ttBrandName, setTtBrandName] = useState("");
   const [ttAccountName, setTtAccountName] = useState("");
@@ -645,7 +645,7 @@ const [newContentType, setNewContentType] = useState("");
     localStorage.setItem("cf_wa_webhook", val);
   };
 
-  const filteredOrders = useMemo(() => orders.filter((order) => {
+  const filteredOrders = useMemo(() => (Array.isArray(orders) ? orders : []).filter((order) => {
     const q = searchQuery.toLowerCase();
     const matchesSearch = (order.title || "").toLowerCase().includes(q) || (order.brand || "").toLowerCase().includes(q) || (order.id || "").toLowerCase().includes(q);
     return matchesSearch && (statusFilter === "Semua" || order.status === statusFilter) && (platformFilter === "Semua" || order.platform === platformFilter);
@@ -653,9 +653,9 @@ const [newContentType, setNewContentType] = useState("");
 
   const stats = useMemo(() => ({
     total: (orders?.length ?? 0),
-    queue: orders.filter((o) => o.status === "Antrean").length,
-    inProgress: orders.filter((o) => o.status === "Sedang Dikerjakan" || o.status === "Revisi").length,
-    reviewDone: orders.filter((o) => o.status === "Review" || o.status === "Selesai").length,
+    queue: (Array.isArray(orders) ? orders.filter((o) => o.status === "Antrean").length : 0),
+    inProgress: (Array.isArray(orders) ? orders.filter((o) => o.status === "Sedang Dikerjakan" || o.status === "Revisi").length : 0),
+    reviewDone: (Array.isArray(orders) ? orders.filter((o) => o.status === "Review" || o.status === "Selesai").length : 0),
   }), [orders]);
 
   if (authLoading) {
@@ -837,7 +837,7 @@ const [newContentType, setNewContentType] = useState("");
             <button type="button" onClick={() => setIsWaModalOpen(true)} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 transition cursor-pointer">
               <Bell className="w-3.5 h-3.5 text-amber-600" />
               <span>Notif WA</span>
-              <span className="px-1.5 py-0.5 rounded-full bg-amber-400 text-slate-950 text-[10px] font-bold">{waLogs.filter((l) => !(Array.isArray(readWaLogIds) && readWaLogIds.includes(l.id))).length}</span>
+              <span className="px-1.5 py-0.5 rounded-full bg-amber-400 text-slate-950 text-[10px] font-bold">{Array.isArray(waLogs) ? waLogs.filter((l) => !(Array.isArray(readWaLogIds) && readWaLogIds.includes(l.id))).length : 0}</span>
             </button>
             <div className="hidden md:flex flex-col items-end leading-tight">
               <span className="text-xs font-bold text-slate-800">{currentUser.name}</span>
