@@ -5,6 +5,48 @@ import { createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswor
 import { collection, doc, setDoc, addDoc, updateDoc, onSnapshot, query, orderBy, serverTimestamp, getDoc, deleteDoc } from "firebase/firestore";
 
 const BRAND_LOGO_URL = "/Logo_3.jpeg";
+function isOrderVisibleToCurrentEditor(order, editorUser) {
+  if (!order || !editorUser) return false;
+  const edName = String(editorUser?.name || editorUser?.fullName || "").trim().toLowerCase();
+  const edEmail = String(editorUser?.email || "").trim().toLowerCase();
+  const edUid = String(editorUser?.uid || editorUser?.id || "").trim();
+
+  const assignedName = String(order?.assignedEditor || order?.editorName || "").trim().toLowerCase();
+  const assignedEmail = String(order?.assignedEditorEmail || order?.editorEmail || "").trim().toLowerCase();
+  const assignedUid = String(order?.assignedEditorUid || order?.editorUid || "").trim();
+  const claimedBy = String(order?.claimedBy || order?.takenBy || "").trim().toLowerCase();
+  const submittedBy = String(order?.submittedBy || "").trim().toLowerCase();
+
+  const matchesCurrentEditor = (valName, valEmail, valUid) => {
+    if (valUid && edUid && valUid === edUid) return true;
+    if (valEmail && edEmail && valEmail === edEmail) return true;
+    if (valName && edName && valName === edName) return true;
+    if (valName && edEmail && valName === edEmail) return true;
+    return false;
+  };
+
+  if (assignedName || assignedEmail || assignedUid) {
+    return matchesCurrentEditor(assignedName, assignedEmail, assignedUid);
+  }
+
+  const st = String(order?.status || "").trim();
+  if (claimedBy || submittedBy) {
+    return (
+      (claimedBy && ((edName && claimedBy === edName) || (edEmail && claimedBy === edEmail))) ||
+      (submittedBy && ((edName && submittedBy === edName) || (edEmail && submittedBy === edEmail)))
+    );
+  }
+
+  return st === "Antrean";
+}
+
+function normalizeTeamRole(rawRole, fallback = "Brand Manager") {
+  const cleaned = String(rawRole || "").trim();
+  if (!cleaned) return fallback;
+  if (/social media specialist/i.test(cleaned)) return "Brand Manager";
+  return cleaned;
+}
+
 const ROLES = ["Brand Manager", "Video Editor"];
 const PLATFORMS = ["TikTok", "Instagram Reels", "YouTube Shorts"];
 
@@ -16,6 +58,143 @@ const STATUS_CONFIG = {
   "Selesai": { label: "Selesai", badgeClass: "bg-emerald-50 text-emerald-700 border-emerald-200", dotClass: "bg-emerald-500" },
 };
 
+function getAccountWaStorageKey(prefix, user) {
+  const uid = String(user?.uid || user?.id || "").trim();
+  const email = String(user?.email || "").trim().toLowerCase();
+  const name = String(user?.name || user?.fullName || "").trim().toLowerCase();
+  const accountKey = uid || email || name || "guest";
+  return `${prefix}_${encodeURIComponent(accountKey)}`;
+}
+
+function readWaListForUser(prefix, user) {
+  try {
+    const scopedKey = getAccountWaStorageKey(prefix, user);
+    const rawScoped = localStorage.getItem(scopedKey);
+    if (rawScoped !== null) {
+      const parsed = JSON.parse(rawScoped);
+      return Array.isArray(parsed) ? parsed : [];
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+function writeWaListForUser(prefix, user, list) {
+  try {
+    const scopedKey = getAccountWaStorageKey(prefix, user);
+    localStorage.setItem(scopedKey, JSON.stringify((Array.isArray(list) ? list : []).slice(0, 100)));
+  } catch {}
+}
+
+function isWaLogForCurrentAccount(log, user) {
+  if (!log) return false;
+  const uid = String(user?.uid || user?.id || "").trim();
+  const email = String(user?.email || "").trim().toLowerCase();
+  const name = String(user?.name || user?.fullName || "").trim().toLowerCase();
+  const phoneDigits = String(user?.whatsapp || "").replace(/\D/g, "");
+
+  const logOwnerUid = String(log?.ownerUid || "").trim();
+  const logOwnerEmail = String(log?.ownerEmail || "").trim().toLowerCase();
+  const logTargetUid = String(log?.targetUid || "").trim();
+  const logTargetEmail = String(log?.targetEmail || "").trim().toLowerCase();
+  const logTargetName = String(log?.targetName || "").trim().toLowerCase();
+  const logPhoneDigits = String(log?.phone || "").replace(/\D/g, "");
+
+  if (logTargetUid) return Boolean(uid && logTargetUid === uid);
+  if (logTargetEmail) return Boolean(email && logTargetEmail === email);
+  if (logOwnerUid || logOwnerEmail) {
+    return Boolean((uid && logOwnerUid === uid) || (email && logOwnerEmail === email));
+  }
+  if (logTargetName) {
+    if (name && logTargetName === name) return true;
+    if (email && logTargetName === email) return true;
+  }
+  if (logPhoneDigits && phoneDigits && logPhoneDigits === phoneDigits) {
+    return true;
+  }
+  return false;
+}
+
+function getWaAccountKey(user) {
+  const uid = String(user?.uid || user?.id || "").trim();
+  const email = String(user?.email || "").trim().toLowerCase();
+  const name = String(user?.name || user?.fullName || "").trim().toLowerCase();
+  return encodeURIComponent(uid || email || name || "guest");
+}
+
+function loadAccountWaStorage(prefix, user) {
+  try {
+    const key = `${prefix}_${getWaAccountKey(user)}`;
+    const raw = localStorage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveAccountWaStorage(prefix, user, list) {
+  try {
+    const key = `${prefix}_${getWaAccountKey(user)}`;
+    localStorage.setItem(key, JSON.stringify((Array.isArray(list) ? list : []).slice(0, 100)));
+  } catch {}
+}
+
+function resolveWaCanonicalAccountKey(userOrMember, allMembers = []) {
+  const uid = String(userOrMember?.uid || userOrMember?.userId || userOrMember?.id || userOrMember?.docId || "").trim();
+  const email = String(userOrMember?.email || "").trim().toLowerCase();
+  const name = String(userOrMember?.name || userOrMember?.fullName || "").trim().toLowerCase();
+
+  const members = Array.isArray(allMembers) ? allMembers : [];
+  const matched = members.find((m) => {
+    if (!m) return false;
+    const mUid = String(m?.uid || m?.userId || m?.id || m?.docId || "").trim();
+    const mEmail = String(m?.email || "").trim().toLowerCase();
+    const mName = String(m?.name || m?.fullName || "").trim().toLowerCase();
+    if (uid && mUid && uid === mUid) return true;
+    if (email && mEmail && email === mEmail) return true;
+    if (name && mName && name === mName) return true;
+    return false;
+  });
+
+  const cUid = String(matched?.uid || matched?.userId || matched?.id || matched?.docId || uid || "").trim();
+  const cEmail = String(matched?.email || email || "").trim().toLowerCase();
+  const cName = String(matched?.name || matched?.fullName || name || "").trim().toLowerCase();
+  return encodeURIComponent(cUid || cEmail || cName || "guest");
+}
+
+function belongsToWaAccount(log, user) {
+  if (!log || !user) return false;
+  const uid = String(user?.uid || user?.userId || user?.id || user?.docId || "").trim();
+  const email = String(user?.email || "").trim().toLowerCase();
+  const name = String(user?.name || user?.fullName || "").trim().toLowerCase();
+
+  const logTargetUid = String(log?.targetUid || "").trim();
+  const logTargetEmail = String(log?.targetEmail || "").trim().toLowerCase();
+  const logTargetName = String(log?.targetName || "").trim().toLowerCase();
+  const logBucketKey = String(log?.recipientBucketKey || "").trim();
+
+  if (logBucketKey) {
+    const userBucketKey = resolveWaCanonicalAccountKey(user);
+    if (logBucketKey === userBucketKey) return true;
+  }
+
+  if (logTargetUid) {
+    return Boolean(uid && logTargetUid === uid);
+  }
+  if (logTargetEmail) {
+    return Boolean(email && logTargetEmail === email);
+  }
+  if (logTargetName) {
+    if (name && logTargetName === name) return true;
+    if (email && logTargetName === email) return true;
+    return false;
+  }
+
+  return false;
+}
+
 function normalizeWhatsApp(raw) {
   const digits = (raw || "").replace(/\D/g, "");
   if (!digits) return "";
@@ -24,14 +203,68 @@ function normalizeWhatsApp(raw) {
   return digits;
 }
 
-function BrandLogo({ sizeClass = "w-11 h-11" }) {
-  const [imgError, setImgError] = useState(false);
+function extractRawWhatsAppField(obj) {
+  if (!obj || typeof obj !== "object") return "";
   return (
-    <div className={sizeClass + " rounded-full overflow-hidden border-2 border-amber-400 bg-gradient-to-br from-sky-50 to-amber-50 shadow-sm flex items-center justify-center shrink-0"}>
+    obj.whatsapp ||
+    obj.wa ||
+    obj.waNumber ||
+    obj.whatsappNumber ||
+    obj.phone ||
+    obj.noWa ||
+    obj.no_hp ||
+    ""
+  );
+}
+
+function resolveCurrentUserWhatsApp(user, usersList = []) {
+  const direct = normalizeWhatsApp(extractRawWhatsAppField(user));
+  if (direct) return direct;
+
+  if (Array.isArray(usersList) && usersList.length > 0 && user) {
+    const uid = String(user.uid || user.id || "").trim().toLowerCase();
+    const email = String(user.email || "").trim().toLowerCase();
+    const name = String(user.name || user.fullName || "").trim().toLowerCase();
+
+    const matched = usersList.find((u) => {
+      if (!u) return false;
+      const uUid = String(u.uid || u.id || "").trim().toLowerCase();
+      const uEmail = String(u.email || "").trim().toLowerCase();
+      const uName = String(u.name || u.fullName || "").trim().toLowerCase();
+      return (
+        (uid && uUid && uid === uUid) ||
+        (email && uEmail && email === uEmail) ||
+        (name && uName && name === uName)
+      );
+    });
+
+    const fromTeam = normalizeWhatsApp(extractRawWhatsAppField(matched));
+    if (fromTeam) return fromTeam;
+  }
+
+  return "";
+}
+
+function BrandLogo({ sizeClass = "w-12 h-12 sm:w-14 sm:h-14" }) {
+  const [imgError, setImgError] = useState(false);
+
+  return (
+    <div
+      className={
+        sizeClass +
+        " rounded-full overflow-hidden border-2 border-amber-400 bg-white shadow-sm flex items-center justify-center shrink-0"
+      }
+      aria-label="CreativeFlow Studio Logo"
+    >
       {!imgError ? (
-        <img src={BRAND_LOGO_URL} alt="CreativeFlow Studio Logo" onError={() => setImgError(true)} className="w-full h-full object-cover rounded-full" />
+        <img
+          src="/Logo_3.jpeg"
+          alt="CreativeFlow Studio Logo"
+          onError={() => setImgError(true)}
+          className="w-full h-full object-cover scale-[1.06]"
+        />
       ) : (
-        <span className="font-bold text-xs text-sky-700">CF</span>
+        <span className="font-bold text-xs text-sky-700">ADSY</span>
       )}
     </div>
   );
@@ -194,12 +427,50 @@ function VideoPreviewPlayer({ previewUrl, title, platform }) {
           Unduh Video
         </button>
       )}
+      
+
     </div>
   );
 }
 
-export default function App() {
+class AppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    console.error("Render error tertangkap AppErrorBoundary:", error, info);
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="min-h-screen bg-slate-950 text-white p-6 flex items-center justify-center">
+          <div className="max-w-xl w-full rounded-2xl border border-rose-500/40 bg-slate-900 p-5 space-y-3">
+            <h2 className="text-base font-bold text-rose-400">Terjadi Error Render pada Komponen</h2>
+            <pre className="text-xs bg-slate-950 p-3 rounded-xl overflow-x-auto text-rose-200 whitespace-pre-wrap">
+              {String(this.state.error?.stack || this.state.error?.message || this.state.error)}
+            </pre>
+            <button
+              type="button"
+              onClick={() => this.setState({ error: null })}
+              className="px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-xs font-semibold cursor-pointer"
+            >
+              Coba Render Ulang
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function CreativeFlowApp() {
   const [currentUser, setCurrentUser] = useState(null);
+  const [newContentType, setNewContentType] = useState("");
   const [authLoading, setAuthLoading] = useState(true);
   const [authMode, setAuthMode] = useState("login");
   const [teamUsers, setTeamUsers] = useState([]);
@@ -209,10 +480,40 @@ export default function App() {
   const [regName, setRegName] = useState("");
   const [regEmail, setRegEmail] = useState("");
   const [regPassword, setRegPassword] = useState("");
-  const [regRole, setRegRole] = useState("Social Media Specialist");
+  const [regRole, setRegRole] = useState("Brand Manager");
   const [regWhatsapp, setRegWhatsapp] = useState("");
   const [authError, setAuthError] = useState("");
+  const [waLogs, setWaLogs] = useState([]);
+  const [readWaLogIds, setReadWaLogIds] = useState([]);
   const [submittingAuth, setSubmittingAuth] = useState(false);
+
+  useEffect(() => {
+    if (!currentUser) {
+      setWaLogs([]);
+      setReadWaLogIds([]);
+      return;
+    }
+    const scopedLogs = loadAccountWaStorage("cf_wa_logs", currentUser).filter((item) =>
+      belongsToWaAccount(item, currentUser)
+    );
+    const scopedReadIds = loadAccountWaStorage("cf_read_wa_logs", currentUser);
+    setWaLogs(scopedLogs);
+    setReadWaLogIds(scopedReadIds);
+  }, [currentUser?.uid, currentUser?.id, currentUser?.email, currentUser?.name, currentUser?.role, currentUser?.whatsapp]);
+
+  useEffect(() => {
+    if (!currentUser) {
+      setWaLogs([]);
+      setReadWaLogIds([]);
+      return;
+    }
+    const loadedLogs = readWaListForUser("cf_wa_logs", currentUser).filter((item) =>
+      isWaLogForCurrentAccount(item, currentUser)
+    );
+    const loadedReadIds = readWaListForUser("cf_read_wa_logs", currentUser);
+    setWaLogs(loadedLogs);
+    setReadWaLogIds(loadedReadIds);
+  }, [currentUser?.uid, currentUser?.id, currentUser?.email, currentUser?.name, currentUser?.whatsapp]);
   const [showPassword, setShowPassword] = useState(false);
   const [showResetForm, setShowResetForm] = useState(false);
   const [resetEmail, setResetEmail] = useState("");
@@ -227,7 +528,33 @@ export default function App() {
 
   const [isNewOrderOpen, setIsNewOrderOpen] = useState(false);
   const [selectedOrderId, setSelectedOrderId] = useState(null);
+  const [showContentHistory, setShowContentHistory] = useState(false);
+  const [showProductivityPanel, setShowProductivityPanel] = useState(false);
+  const [productivityRange, setProductivityRange] = useState("30d");
+  const [productivityRoleFilter, setProductivityRoleFilter] = useState("Semua");
+  const [productivitySearch, setProductivitySearch] = useState("");
+  const [summaryPopupKey, setSummaryPopupKey] = useState(null);
+  const selectedOrder = useMemo(() => {
+    const list = Array.isArray(orders) ? orders : [];
+    const targetId = typeof selectedOrderId !== "undefined" ? selectedOrderId : null;
+    if (!targetId) return null;
+    return (
+      list.find(
+        (o) =>
+          String(o?.docId || "") === String(targetId) ||
+          String(o?.id || "") === String(targetId)
+      ) || null
+    );
+  }, [orders, selectedOrderId]);
   const [isWaModalOpen, setIsWaModalOpen] = useState(false);
+  const [waWebhookUrl, setWaWebhookUrl] = useState(() => {
+    try {
+      return localStorage.getItem("cf_wa_webhook") || "";
+    } catch {
+      return "";
+    }
+  });
+  const [editWaNumber, setEditWaNumber] = useState("");
 
   // State khusus alur submit editor & catatan revisi BM/SMS
   const [showEditorSubmitTab, setShowEditorSubmitTab] = useState(false);
@@ -238,6 +565,13 @@ export default function App() {
   const [newTitle, setNewTitle] = useState("");
   const [newBrand, setNewBrand] = useState("");
   const [newPlatform, setNewPlatform] = useState("TikTok");
+  const [newRawFootageUrl, setNewRawFootageUrl] = useState("");
+  const [newDeadline, setNewDeadline] = useState("");
+  const [newPriority, setNewPriority] = useState("Normal");
+  const [newAssignedEditor, setNewAssignedEditor] = useState("");
+  const [newReferenceUrl, setNewReferenceUrl] = useState("");
+  const [newBrief, setNewBrief] = useState("");
+  const [batchCount, setBatchCount] = useState(1);
   const TIKTOK_CONTENT_TYPES = [
   "Gudang",
   "Motion Graphic",
@@ -252,7 +586,6 @@ const sanitizeContentTypes = (list) =>
   (Array.isArray(list) ? list : []).filter(
     (item) => typeof item === "string" && !item.toLowerCase().includes("soft selling")
   );
-const [newContentType, setNewContentType] = useState("");
   const [tiktokAccounts, setTiktokAccounts] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem("cf_tiktok_accounts") || "[]");
@@ -264,6 +597,8 @@ const [newContentType, setNewContentType] = useState("");
   const [isTiktokDropdownOpen, setIsTiktokDropdownOpen] = useState(false);
   const [activeTiktokAccountId, setActiveTiktokAccountId] = useState(null);
   const [tiktokDrawerTab, setTiktokDrawerTab] = useState("monitoring"); // "monitoring" | "edit"
+  const [viewsDraftMap, setViewsDraftMap] = useState({});
+  const [savingViewsOrderId, setSavingViewsOrderId] = useState(null);
   const [editTtBrandName, setEditTtBrandName] = useState("");
   const [editTtAccountName, setEditTtAccountName] = useState("");
   const [editTtSelectedTypes, setEditTtSelectedTypes] = useState([]);
@@ -272,6 +607,7 @@ const [newContentType, setNewContentType] = useState("");
   const [isDeletingTtAccount, setIsDeletingTtAccount] = useState(false);
   const [postingOrderDocId, setPostingOrderDocId] = useState(null);
   const [isDeletingOrder, setIsDeletingOrder] = useState(false);
+  const [pendingDeleteOrder, setPendingDeleteOrder] = useState(null);
   const [accountSearchQuery, setAccountSearchQuery] = useState("");
   const [accountStatusFilter, setAccountStatusFilter] = useState("Semua");
   const [accountPlatformFilter, setAccountPlatformFilter] = useState("Semua");
@@ -316,7 +652,48 @@ const [newContentType, setNewContentType] = useState("");
     }
   };
 
-  const toggleTtContentType = (typeName) => {
+  const toggleEditTtContentType = (typeName) => {
+    const clean = String(typeName || "").trim();
+    if (!clean || typeof setEditTtSelectedTypes !== "function") return;
+    setEditTtSelectedTypes((prev) => {
+      const list = Array.isArray(prev) ? prev : [];
+      const exists = list.some((item) => String(item || "").trim().toLowerCase() === clean.toLowerCase());
+      const next = exists
+        ? list.filter((item) => String(item || "").trim().toLowerCase() !== clean.toLowerCase())
+        : [...list, clean];
+      return typeof sanitizeContentTypes === "function" ? sanitizeContentTypes(next) : next;
+    });
+  };
+
+  const handleAddEditTtCustomType = (eOrValue) => {
+    if (eOrValue && typeof eOrValue.preventDefault === "function") {
+      eOrValue.preventDefault();
+    }
+    const rawInput =
+      typeof eOrValue === "string"
+        ? eOrValue
+        : (typeof editTtCustomType !== "undefined" ? editTtCustomType : "");
+    const cleanedCandidate =
+      typeof sanitizeContentTypes === "function"
+        ? sanitizeContentTypes([rawInput])[0] || String(rawInput || "").trim()
+        : String(rawInput || "").trim();
+    if (!cleanedCandidate) return;
+
+    if (typeof setEditTtSelectedTypes === "function") {
+      setEditTtSelectedTypes((prev) => {
+        const current = Array.isArray(prev) ? prev : [];
+        const exists = current.some(
+          (item) => String(item || "").trim().toLowerCase() === cleanedCandidate.toLowerCase()
+        );
+        return exists ? current : [...current, cleanedCandidate];
+      });
+    }
+    if (typeof setEditTtCustomType === "function") {
+      setEditTtCustomType("");
+    }
+  };
+
+    const toggleTtContentType = (typeName) => {
     setTtSelectedTypes((prev) =>
       prev.includes(typeName) ? prev.filter((item) => item !== typeName) : [...prev, typeName]
     );
@@ -338,505 +715,39 @@ const [newContentType, setNewContentType] = useState("");
     const targetId = existingAccount?.id || ("tt_" + Date.now());
     const hasFirestoreId = Boolean(existingAccount?.id && !String(existingAccount.id).startsWith("tt_"));
 
+    const cleanLogo = (ttBrandLogo || "").trim();
     const nextItem = {
       id: targetId,
       brandName: cleanBrand,
       accountName: cleanAccount,
+      logoUrl: cleanLogo,
+      brandLogo: cleanLogo,
       contentTypes: cleanTypes,
       createdAtMs,
     };
 
     setTiktokAccounts((prev) => {
-      const safePrev = Array.isArray(prev) ? prev : [];
-      const filtered = safePrev.filter(
-        (item) => String(item?.accountName || "").toLowerCase() !== cleanAccount.toLowerCase()
-      );
-      const updated = [nextItem, ...filtered];
+      const safe = Array.isArray(prev) ? prev : [];
+      const updated = existingAccount
+        ? safe.map((item) =>
+            item.id === targetId
+              ? {
+                  ...item,
+                  brandName: cleanBrand,
+                  accountName: cleanAccount,
+                  logoUrl: cleanLogo,
+                  brandLogo: cleanLogo,
+                  contentTypes: cleanTypes,
+                }
+              : item
+          )
+        : [nextItem, ...safe];
       try {
         localStorage.setItem("cf_tiktok_accounts", JSON.stringify(updated));
       } catch {}
       return updated;
     });
-
-    setNewBrand(cleanAccount);
-    setNewContentType(cleanTypes[0] || "");
-    setTtBrandName("");
-    setTtAccountName("");
-      setTtSelectedTypes([]);
-      setTtBrandLogo("");
-    setIsAddTiktokModalOpen(false);
-
     try {
-      if (hasFirestoreId) {
-        await updateDoc(doc(db, "tiktokAccounts", existingAccount.id), {
-          brandName: cleanBrand,
-          accountName: cleanAccount,
-          contentTypes: cleanTypes,
-          updatedAt: serverTimestamp(),
-        });
-      } else {
-        const docRef = await addDoc(collection(db, "tiktokAccounts"), {
-          brandName: cleanBrand,
-          accountName: cleanAccount,
-        logoUrl: ttBrandLogo.trim(),
-        brandLogo: ttBrandLogo.trim(),
-          contentTypes: cleanTypes,
-          createdAtMs,
-          createdAt: serverTimestamp(),
-        });
-      setTiktokAccounts((prev) => {
-        const nextItem = {
-          id: docRef.id,
-          docId: docRef.id,
-          brandName: ttBrandName.trim(),
-          accountName: formattedAccountName,
-          platform: "TikTok",
-          logoUrl: ttBrandLogo.trim(),
-          brandLogo: ttBrandLogo.trim(),
-          contentTypes: Array.from(new Set(ttSelectedTypes)),
-        };
-        return Array.isArray(prev) ? [nextItem, ...prev] : [nextItem];
-      });
-        setTiktokAccounts((prev) => {
-          const safePrev = Array.isArray(prev) ? prev : [];
-          const synced = safePrev.map((item) =>
-            item.id === targetId ? { ...item, id: docRef.id } : item
-          );
-          try {
-            localStorage.setItem("cf_tiktok_accounts", JSON.stringify(synced));
-          } catch {}
-          return synced;
-        });
-      }
-    } catch (err) {
-      console.error("Gagal menyimpan/memperbarui akun TikTok ke Firestore:", err);
-    }
-  };
-
-  const matchedTiktokAccount = (Array.isArray(tiktokAccounts) ? tiktokAccounts : []).find(
-    (item) =>
-      item.accountName.toLowerCase() === (newBrand || "").trim().toLowerCase() ||
-      item.brandName.toLowerCase() === (newBrand || "").trim().toLowerCase()
-  );
-  const availableContentTypes = sanitizeContentTypes(
-    matchedTiktokAccount && Array.isArray(matchedTiktokAccount.contentTypes) && (matchedTiktokAccount.contentTypes?.length ?? 0) > 0
-      ? matchedTiktokAccount.contentTypes
-      : TIKTOK_CONTENT_TYPES
-  );
-  const [newDeadline, setNewDeadline] = useState("2026-11-25");
-  const [newPriority, setNewPriority] = useState("Normal");
-  const [newBrief, setNewBrief] = useState("");
-  const [newReferenceUrl, setNewReferenceUrl] = useState("");
-  const [newRawFootageUrl, setNewRawFootageUrl] = useState("");
-  const [newAssignedEditor, setNewAssignedEditor] = useState("");
-
-  const [waWebhookUrl, setWaWebhookUrl] = useState(() => localStorage.getItem("cf_wa_webhook") || "");
-  const [waLogs, setWaLogs] = useState([]);
-  const [readWaLogIds, setReadWaLogIds] = useState(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem("cf_read_wa_logs") || "[]");
-      return Array.isArray(saved) ? saved : [];
-    } catch {
-      return [];
-    }
-  });
-  const handleMarkAllWaAsRead = () => {
-    const allIds = Array.from(new Set([...readWaLogIds, ...waLogs.map((l) => l.id).filter(Boolean)]));
-    setReadWaLogIds(allIds);
-    try {
-      localStorage.setItem("cf_read_wa_logs", JSON.stringify(allIds));
-    } catch {}
-  };
-  const [editWaNumber, setEditWaNumber] = useState("");
-
-  useEffect(() => {
-    const unsubAuth = onAuthStateChanged(auth, async (fbUser) => {
-      if (fbUser) {
-        try {
-          const userSnap = await getDoc(doc(db, "teamUsers", fbUser.uid));
-          if (userSnap.exists()) {
-            const profile = { id: fbUser.uid, ...userSnap.data() };
-            setCurrentUser(profile);
-            setEditWaNumber(profile.whatsapp || "");
-          } else {
-            const fallbackProfile = {
-              id: fbUser.uid,
-              name: fbUser.email.split("@")[0],
-              email: fbUser.email,
-              role: "Brand Manager",
-              whatsapp: "",
-            };
-            await setDoc(doc(db, "teamUsers", fbUser.uid), fallbackProfile);
-            setCurrentUser(fallbackProfile);
-          }
-        } catch (err) {
-          console.error("Gagal memuat profil Firestore:", err);
-        }
-      } else {
-        setCurrentUser(null);
-      }
-      setAuthLoading(false);
-    });
-    return () => unsubAuth();
-  }, []);
-
-  useEffect(() => {
-    if (!currentUser) return;
-
-    const unsubUsers = onSnapshot(collection(db, "teamUsers"), (snap) => {
-      const list = Array.isArray(snap?.docs) ? snap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) })) : [];
-      setTeamUsers(list);
-      const firstEditor = list.find((u) => u.role === "Video Editor");
-      if (firstEditor && !newAssignedEditor) {
-        setNewAssignedEditor(firstEditor.name);
-      }
-    });
-
-    const ordersQuery = query(collection(db, "orders"), orderBy("createdAtMs", "desc"));
-    const unsubOrders = onSnapshot(ordersQuery, (snap) => {
-      const list = Array.isArray(snap?.docs) ? snap.docs.map((d) => ({ docId: d.id, ...(d.data() || {}) })) : [];
-      setOrders(list);
-    });
-
-    const logsQuery = query(collection(db, "waLogs"), orderBy("createdAtMs", "desc"));
-    const unsubLogs = onSnapshot(logsQuery, (snap) => {
-      const list = Array.isArray(snap?.docs) ? snap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) })) : [];
-      setWaLogs(list);
-    });
-
-    return () => {
-      unsubUsers();
-      unsubOrders();
-      unsubLogs();
-    };
-  }, [currentUser]);
-
-  const editors = useMemo(() => teamUsers.filter((u) => u.role === "Video Editor"), [teamUsers]);
-  const selectedOrder = useMemo(() => orders.find((o) => o.docId === selectedOrderId) || null, [orders, selectedOrderId]);
-
-  const [pendingDeleteOrder, setPendingDeleteOrder] = useState(null);
-  const isBrandManager = String(currentUser?.role || "").trim().toLowerCase() === "brand manager";
-
-  const handleDeleteVideoOrder = (targetOrder) => {
-    const ord = targetOrder || selectedOrder;
-    if (!isBrandManager || !ord) return;
-    setPendingDeleteOrder(ord);
-  };
-
-  const confirmDeleteVideoOrder = async () => {
-    const ord = pendingDeleteOrder;
-    if (!isBrandManager || !ord) return;
-
-    setIsDeletingOrder(true);
-    try {
-      if (ord.docId) {
-        await deleteDoc(doc(db, "orders", ord.docId));
-      }
-      setPendingDeleteOrder(null);
-      setSelectedOrderId(null);
-    } catch (err) {
-      console.error("Gagal menghapus orderan video:", err);
-    } finally {
-      setIsDeletingOrder(false);
-    }
-  };
-
-  const openOrderDetail = (order) => {
-    setSelectedOrderId(order.docId);
-    setShowEditorSubmitTab(false);
-    setEditorVideoUrl(order.previewUrl || "");
-    setShowRevisionInput(false);
-    setRevisionNote(order.revisionNote || "");
-  };
-
-  const triggerAutoWhatsApp = async ({ eventLabel, recipients, messageText }) => {
-    const validRecipients = recipients.filter((r) => normalizeWhatsApp(r.whatsapp));
-    if ((validRecipients?.length ?? 0) === 0) return;
-
-    const nowText = new Date().toLocaleString("id-ID", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-    const nowMs = Date.now();
-
-    for (const rec of validRecipients) {
-      await addDoc(collection(db, "waLogs"), {
-        time: nowText,
-        createdAtMs: nowMs,
-        event: eventLabel,
-        targetName: rec.name,
-        targetRole: rec.role,
-        phone: normalizeWhatsApp(rec.whatsapp),
-        message: messageText,
-      });
-    }
-
-    const endpointUrl = (typeof waWebhookUrl === "string" ? waWebhookUrl.trim() : "") || "/api/send-wa";
-    try {
-      await fetch(endpointUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          source: "CreativeFlow Studio",
-          event: eventLabel,
-          message: messageText,
-          recipients: validRecipients.map((r) => ({
-            name: r.name,
-            role: r.role,
-            phone: normalizeWhatsApp(r.whatsapp),
-          })),
-        }),
-      });
-    } catch (err) {
-      console.error("Gagal mengirim notifikasi WA:", err);
-    }
-  };
-
-  const handleLogin = async (e) => {
-    e.preventDefault();
-    setAuthError("");
-    setSubmittingAuth(true);
-    try {
-      await signInWithEmailAndPassword(auth, loginEmail.trim(), loginPassword);
-    } catch {
-      setAuthError("Email atau kata sandi salah, atau akun belum terdaftar di Firebase.");
-    } finally {
-      setSubmittingAuth(false);
-    }
-  };
-
-  const handleSendPasswordReset = async (e) => {
-    e.preventDefault();
-    setResetError("");
-    setResetMessage("");
-    const targetEmail = (resetEmail || loginEmail).trim();
-    if (!targetEmail) {
-      setResetError("Masukkan alamat email akun yang terdaftar terlebih dahulu.");
-      return;
-    }
-    setSendingReset(true);
-    try {
-      await sendPasswordResetEmail(auth, targetEmail);
-      setResetMessage("Tautan reset kata sandi telah dikirim ke " + targetEmail + ". Cek inbox atau folder Spam.");
-    } catch {
-      setResetError("Gagal mengirim email reset. Pastikan alamat email sudah terdaftar.");
-    } finally {
-      setSendingReset(false);
-    }
-  };
-
-  const handleRegister = async (e) => {
-    e.preventDefault();
-    setAuthError("");
-    const cleanPhone = normalizeWhatsApp(regWhatsapp);
-    if (!regName.trim() || !regEmail.trim() || (regPassword?.length ?? 0) < 6) {
-      setAuthError("Nama, email, dan kata sandi (minimal 6 karakter) wajib diisi.");
-      return;
-    }
-    if (!cleanPhone || (cleanPhone?.length ?? 0) < 10) {
-      setAuthError("Masukkan nomor WhatsApp aktif yang valid (contoh: 081234567890).");
-      return;
-    }
-    setSubmittingAuth(true);
-    try {
-      const cred = await createUserWithEmailAndPassword(auth, regEmail.trim(), regPassword);
-      const profile = {
-        name: regName.trim(),
-        email: regEmail.trim(),
-        role: regRole,
-        whatsapp: cleanPhone,
-        createdAt: serverTimestamp(),
-      };
-      await setDoc(doc(db, "teamUsers", cred.user.uid), profile);
-      setCurrentUser({ id: cred.user.uid, ...profile });
-      setEditWaNumber(cleanPhone);
-      setRegName(""); setRegEmail(""); setRegPassword(""); setRegWhatsapp("");
-    } catch (err) {
-      setAuthError(err.message || "Gagal mendaftar akun tim.");
-    } finally {
-      setSubmittingAuth(false);
-    }
-  };
-
-  // 1. Order baru dibuat -> otomatis status "Antrean" + WA otomatis ke Editor
-  const handleCreateOrder = async (e) => {
-    e.preventDefault();
-    if (!newTitle.trim() || !newBrand.trim() || !currentUser) return;
-
-    const orderCode = "ORD-" + String((orders?.length ?? 0) + 1).padStart(3, "0");
-    const assigned = newAssignedEditor || (editors[0] ? editors[0].name : "Belum Ditentukan");
-    const nowText = new Date().toLocaleString("id-ID", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-
-    const newOrderData = {
-      id: orderCode,
-      title: newTitle.trim(),
-      brand: newBrand.trim(),
-        contentType: (newContentType || "").trim(),
-      platform: "TikTok",
-      platform: "TikTok",
-      aspectRatio: "9:16",
-      deadline: newDeadline,
-      priority: newPriority,
-      status: "Antrean",
-      isPosted: false,
-      brief: newBrief.trim() || "Brief video vertikal 9:16 siap dikerjakan.",
-      referenceUrl: newReferenceUrl.trim(),
-        rawFootageUrl: newRawFootageUrl.trim(),
-      previewUrl: "",
-      revisionNote: "",
-      requestedBy: currentUser.name,
-      requestedByRole: currentUser.role,
-      assignedEditor: assigned,
-      createdAt: nowText,
-      createdAtMs: Date.now(),
-    };
-
-    await addDoc(collection(db, "orders"), newOrderData);
-    setIsNewOrderOpen(false);
-    setNewTitle(""); setNewBrand(""); setNewBrief(""); setNewReferenceUrl("");
-      setNewRawFootageUrl("");
-
-    const targetEditors = teamUsers.filter((u) => u.role === "Video Editor" && (!assigned || u.name === assigned));
-    await triggerAutoWhatsApp({
-      eventLabel: "Order Baru Masuk (Antrean)",
-      recipients: (targetEditors?.length ?? 0) > 0 ? targetEditors : editors,
-      messageText: "[CreativeFlow Studio] Order baru " + orderCode + " (" + newOrderData.brand + " - " + newOrderData.platform + " 9:16): \"" + newOrderData.title + "\" dari " + currentUser.name + " (" + currentUser.role + "). Deadline: " + newOrderData.deadline,
-    });
-  };
-
-  // 2. Editor klik "Sedang Dikerjakan" -> status jadi "Sedang Dikerjakan" + WA otomatis ke BM/SMS pemesan
-  const handleEditorStartWork = async () => {
-    if (!selectedOrder) return;
-    await updateDoc(doc(db, "orders", selectedOrder.docId), {
-      status: "Sedang Dikerjakan",
-    });
-
-    const stakeholders = teamUsers.filter((u) => u.name === selectedOrder.requestedBy || u.role === "Brand Manager");
-    await triggerAutoWhatsApp({
-      eventLabel: "Order Sedang Dikerjakan Editor",
-      recipients: stakeholders,
-      messageText: "[CreativeFlow Studio] Order " + selectedOrder.id + " (" + selectedOrder.brand + ") \"" + selectedOrder.title + "\" mulai dikerjakan oleh " + currentUser.name + ".",
-    });
-  };
-
-  // 3. Editor isi link video lalu klik "Kirim" -> status jadi "Review" + WA otomatis ke BM & SMS
-  const handleEditorSubmitVideo = async (e) => {
-    e.preventDefault();
-    if (!selectedOrder || !editorVideoUrl.trim()) return;
-
-    await updateDoc(doc(db, "orders", selectedOrder.docId), {
-      previewUrl: editorVideoUrl.trim(),
-      status: "Review",
-    });
-    setShowEditorSubmitTab(false);
-
-    const stakeholders = teamUsers.filter(
-      (u) => u.name === selectedOrder.requestedBy || u.role === "Brand Manager" || u.role === "Social Media Specialist"
-    );
-    await triggerAutoWhatsApp({
-      eventLabel: "Hasil Edit Dikirim (Review)",
-      recipients: stakeholders,
-      messageText: "[CreativeFlow Studio] Hasil edit order " + selectedOrder.id + " (" + selectedOrder.brand + ") \"" + selectedOrder.title + "\" telah dikirim oleh " + currentUser.name + " dan siap di-review.",
-    });
-  };
-
-  // 4. BM / SMS klik "Revisi" -> status jadi "Revisi" + WA otomatis ke Editor
-  const handleRequestRevision = async (e) => {
-    e.preventDefault();
-    if (!selectedOrder) return;
-
-    await updateDoc(doc(db, "orders", selectedOrder.docId), {
-      status: "Revisi",
-      revisionNote: revisionNote.trim(),
-    });
-    setShowRevisionInput(false);
-
-    const targetEditors = teamUsers.filter(
-      (u) => u.role === "Video Editor" && (!selectedOrder.assignedEditor || u.name === selectedOrder.assignedEditor)
-    );
-    await triggerAutoWhatsApp({
-      eventLabel: "Permintaan Revisi Order",
-      recipients: (targetEditors?.length ?? 0) > 0 ? targetEditors : editors,
-      messageText: "[CreativeFlow Studio] Order " + selectedOrder.id + " (" + selectedOrder.brand + ") \"" + selectedOrder.title + "\" perlu REVISI dari " + currentUser.name + (revisionNote.trim() ? ". Catatan: " + revisionNote.trim() : "."),
-    });
-  };
-
-  // 5. BM / SMS klik "Selesai" -> status jadi "Selesai" & TANPA kirim WA
-  const isOrderMatchedToTiktokAccount = (order, account) => {
-    if (!order || !account) return false;
-    const orderBrand = String(order.brand || "").trim().toLowerCase();
-    const handle = String(account.accountName || "").trim().toLowerCase();
-    const brandName = String(account.brandName || "").trim().toLowerCase();
-    return Boolean(
-      (handle && orderBrand === handle) ||
-      (brandName && orderBrand === brandName) ||
-      (handle && orderBrand.includes(handle))
-    );
-  };
-
-  const activeTiktokAccount = useMemo(() => {
-    const list = Array.isArray(tiktokAccounts) ? tiktokAccounts : [];
-    return list.find((acc) => acc.id === activeTiktokAccountId) || null;
-  }, [tiktokAccounts, activeTiktokAccountId]);
-
-  const openTiktokAccountManager = (account, initialTab = "monitoring") => {
-    if (!account) return;
-    setActiveTiktokAccountId(account.id);
-    setTiktokDrawerTab(initialTab);
-    setTiktokContentFilter("Semua");
-    setEditTtBrandName(account.brandName || "");
-    setEditTtAccountName(account.accountName || "");
-    setEditTtBrandLogo(account?.logoUrl || account?.brandLogo || "");
-    setEditTtSelectedTypes(Array.isArray(account.contentTypes) ? account.contentTypes : []);
-    setEditTtCustomType("");
-  };
-
-  const toggleEditTtContentType = (typeName) => {
-    setEditTtSelectedTypes((prev) => {
-      const safe = Array.isArray(prev) ? prev : [];
-      return safe.includes(typeName) ? safe.filter((item) => item !== typeName) : [...safe, typeName];
-    });
-  };
-
-  const handleAddEditTtCustomType = () => {
-    const clean = (editTtCustomType || "").trim();
-    if (!clean) return;
-    setEditTtSelectedTypes((prev) => {
-      const safe = Array.isArray(prev) ? prev : [];
-      return safe.some((t) => t.toLowerCase() === clean.toLowerCase()) ? safe : [...safe, clean];
-    });
-    setEditTtCustomType("");
-  };
-
-  const handleUpdateTiktokAccountDetail = async (e) => {
-    e.preventDefault();
-    if (!activeTiktokAccount) return;
-    const cleanBrand = (editTtBrandName || "").trim();
-    let cleanHandle = (editTtAccountName || "").trim();
-    const cleanTypes = sanitizeContentTypes(Array.isArray(editTtSelectedTypes) ? editTtSelectedTypes : []);
-    if (!cleanBrand || !cleanHandle || cleanTypes.length === 0) return;
-    if (!cleanHandle.startsWith("@")) cleanHandle = "@" + cleanHandle;
-
-    setIsSavingTtEdit(true);
-    try {
-      const hasFirestoreId = Boolean(activeTiktokAccount.id && !String(activeTiktokAccount.id).startsWith("tt_"));
-      if (hasFirestoreId) {
-        await updateDoc(doc(db, "tiktokAccounts", activeTiktokAccount.id), {
-          brandName: cleanBrand,
-          accountName: cleanHandle,
-          contentTypes: cleanTypes,
-          updatedAt: serverTimestamp(),
-        });
-      }
-      setTiktokAccounts((prev) => {
-        const safe = Array.isArray(prev) ? prev : [];
-        const updated = safe.map((item) =>
-          item.id === activeTiktokAccount.id
-            ? { ...item, brandName: cleanBrand, accountName: cleanHandle, contentTypes: cleanTypes }
-            : item
-        );
-        try {
-          localStorage.setItem("cf_tiktok_accounts", JSON.stringify(updated));
-        } catch {}
-        return updated;
-      });
       setTiktokDrawerTab("monitoring");
     } catch (err) {
       console.error("Gagal memperbarui detail akun TikTok:", err);
@@ -884,6 +795,19 @@ const [newContentType, setNewContentType] = useState("");
         postedAtMs: Date.now(),
         postedAt: serverTimestamp(),
       });
+      const postedTarget = order.assignedEditor || order.creatorName || order.accountName || order.brand || currentUser?.name || "Tim";
+      await pushWaNotification({
+        event: "Konten Sudah Diposting",
+        targetName: postedTarget,
+        phone: resolveTeamWhatsApp(postedTarget),
+        message: formatWaOrderMessage({
+          recipientName: postedTarget,
+          order,
+          note: order.brief || "-",
+          statusLabel: "Terposting",
+          closing: "Konten sudah berhasil diposting ya. Terima kasih!",
+        }),
+      });
     } catch (err) {
       console.error("Gagal menandai konten sebagai sudah diposting:", err);
     } finally {
@@ -897,6 +821,19 @@ const [newContentType, setNewContentType] = useState("");
     await updateDoc(doc(db, "orders", selectedOrder.docId), {
       status: "Selesai",
     });
+    const editorTarget = selectedOrder.assignedEditor || selectedOrder.creatorName || "Video Editor";
+    await pushWaNotification({
+      event: "Siap Posting",
+      targetName: editorTarget,
+      phone: resolveTeamWhatsApp(editorTarget),
+      message: formatWaOrderMessage({
+        recipientName: editorTarget,
+        order: selectedOrder,
+        note: selectedOrder.brief || selectedOrder.editorVideoUrl || "-",
+        statusLabel: "Siap Posting",
+        closing: "Mantap, orderannya sudah dinyatakan siap posting ya. Terima kasih atas proses editnya!",
+      }),
+    });
   };
 
   const handleSaveMyWhatsApp = async (e) => {
@@ -908,28 +845,1309 @@ const [newContentType, setNewContentType] = useState("");
     setCurrentUser((prev) => ({ ...prev, whatsapp: cleanPhone }));
   };
 
-  const handleWebhookChange = (val) => {
-    setWaWebhookUrl(val);
-    localStorage.setItem("cf_wa_webhook", val);
+  const handleMarkAllWaAsRead = () => {
+    setReadWaLogIds(() => {
+      const allIds = (Array.isArray(waLogs) ? waLogs : []).map((l) => l.id).filter(Boolean);
+      saveAccountWaStorage("cf_read_wa_logs", currentUser, allIds);
+      return allIds;
+    });
   };
 
-  const filteredOrders = useMemo(() => (Array.isArray(orders) ? orders : []).filter((order) => {
+  const pushWaNotification = async ({ event, targetName, targetEmail, targetUid, phone, message }) => {
+    const memberPool = [
+      ...(Array.isArray(teamUsers) ? teamUsers : []),
+      ...(Array.isArray(editors) ? editors : []),
+    ];
+
+    const rawTargetName = String(targetName || "").trim();
+    const rawTargetEmail = String(targetEmail || "").trim().toLowerCase();
+    const rawTargetUid = String(targetUid || "").trim();
+
+    const matchedRecipient = memberPool.find((m) => {
+      if (!m) return false;
+      const mUid = String(m?.uid || m?.userId || m?.id || m?.docId || "").trim();
+      const mEmail = String(m?.email || "").trim().toLowerCase();
+      const mName = String(m?.name || m?.fullName || "").trim().toLowerCase();
+      if (rawTargetUid && mUid && rawTargetUid === mUid) return true;
+      if (rawTargetEmail && mEmail && rawTargetEmail === mEmail) return true;
+      if (rawTargetName && mName && rawTargetName.toLowerCase() === mName) return true;
+      if (rawTargetName && mEmail && rawTargetName.toLowerCase() === mEmail) return true;
+      return false;
+    });
+
+    const resolvedTargetName = String(
+      matchedRecipient?.name || matchedRecipient?.fullName || rawTargetName || "Tim"
+    ).trim();
+    const resolvedTargetEmail = String(
+      matchedRecipient?.email || rawTargetEmail || ""
+    ).trim().toLowerCase();
+    const resolvedTargetUid = String(
+      matchedRecipient?.uid || matchedRecipient?.userId || matchedRecipient?.id || matchedRecipient?.docId || rawTargetUid || ""
+    ).trim();
+
+    const resolvedPhone = normalizeWhatsApp(
+      phone || matchedRecipient?.whatsapp || matchedRecipient?.phone || ""
+    );
+
+    const nowTime = new Date().toLocaleTimeString("id-ID", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
+    const recipientObj = {
+      uid: resolvedTargetUid,
+      email: resolvedTargetEmail,
+      name: resolvedTargetName,
+      whatsapp: resolvedPhone,
+    };
+    const recipientBucketKey = resolveWaCanonicalAccountKey(recipientObj, memberPool);
+    const actorUid = String(currentUser?.uid || currentUser?.userId || currentUser?.id || currentUser?.docId || "").trim();
+    const actorEmail = String(currentUser?.email || "").trim().toLowerCase();
+
+    const entry = {
+      id: "wa_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7),
+      event: event || "Notifikasi Order",
+      targetName: resolvedTargetName,
+      targetEmail: resolvedTargetEmail,
+      targetUid: resolvedTargetUid,
+      recipientBucketKey,
+      ownerUid: actorUid,
+      ownerEmail: actorEmail,
+      phone: resolvedPhone || "-",
+      message: message || "",
+      time: nowTime,
+      createdAtMs: Date.now(),
+    };
+
+    const targetStorageKey = `cf_wa_logs_${recipientBucketKey}`;
+    try {
+      const existingRaw = localStorage.getItem(targetStorageKey);
+      const existingList = existingRaw ? JSON.parse(existingRaw) : [];
+      const safeList = Array.isArray(existingList) ? existingList : [];
+      const nextTargetList = [entry, ...safeList].slice(0, 100);
+      localStorage.setItem(targetStorageKey, JSON.stringify(nextTargetList));
+    } catch {}
+
+    if (currentUser && belongsToWaAccount(entry, currentUser)) {
+      setWaLogs((prev) => {
+        const list = Array.isArray(prev) ? prev : [];
+        const next = [entry, ...list].filter((item) => belongsToWaAccount(item, currentUser));
+        saveAccountWaStorage("cf_wa_logs", currentUser, next);
+        return next;
+      });
+    }
+
+    try {
+      if (typeof addDoc === "function" && typeof collection === "function" && typeof db !== "undefined" && db) {
+        await addDoc(collection(db, "waLogs"), {
+          ...entry,
+          createdAt: typeof serverTimestamp === "function" ? serverTimestamp() : new Date().toISOString(),
+        });
+      }
+    } catch (err) {
+      console.warn("Simpan log WA ke Firestore dilewati/gagal:", err?.message || err);
+    }
+
+    try {
+      const fonnteToken = String(
+        (typeof import.meta !== "undefined" &&
+          import.meta.env &&
+          (import.meta.env.VITE_FONNTE_TOKEN || import.meta.env.FONNTE_TOKEN)) ||
+          ""
+      ).trim();
+
+      const fonnteTarget = String(resolvedPhone || "").replace(/\D/g, "");
+      if (fonnteToken && fonnteTarget && typeof fetch === "function" && entry.message) {
+        const fonnteRes = await fetch("https://api.fonnte.com/send", {
+          method: "POST",
+          headers: {
+            Authorization: fonnteToken,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            target: fonnteTarget,
+            message: entry.message,
+            countryCode: "62",
+          }),
+        });
+        const fonnteData = await fonnteRes.json().catch(() => null);
+        if (!fonnteRes.ok || (fonnteData && fonnteData.status === false)) {
+          console.warn("Fonnte API merespons gagal:", fonnteData || fonnteRes.status);
+        }
+      }
+    } catch (err) {
+      console.warn("Gagal mengirim pesan ke Fonnte API:", err?.message || err);
+    }
+
+    try {
+      const webhookUrl = String(waWebhookUrl || "").trim();
+      if (webhookUrl && /^https?:\/\//i.test(webhookUrl) && typeof fetch === "function") {
+        await fetch(webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(entry),
+        });
+      }
+    } catch (err) {
+      console.warn("Kirim webhook WA gagal:", err?.message || err);
+    }
+  };
+
+  const handleLogin = async (e) => {
+    if (e && typeof e.preventDefault === "function") e.preventDefault();
+    setAuthError("");
+    const emailVal = String(loginEmail || "").trim();
+    const passVal = String(loginPassword || "");
+    if (!emailVal || !passVal) {
+      setAuthError("Email dan kata sandi wajib diisi.");
+      return;
+    }
+    setSubmittingAuth(true);
+    try {
+      await signInWithEmailAndPassword(auth, emailVal, passVal);
+    } catch (err) {
+      console.error("Login gagal:", err);
+      setAuthError(err?.message || "Gagal masuk. Periksa kembali email dan kata sandi.");
+    } finally {
+      setSubmittingAuth(false);
+    }
+  };
+
+  const handleRegister = async (e) => {
+    if (e && typeof e.preventDefault === "function") e.preventDefault();
+    setAuthError("");
+
+    const nameVal = String(regName || "").trim();
+    const emailVal = String(regEmail || "").trim();
+    const passVal = String(regPassword || "");
+    const whatsappVal = String(regWhatsapp || "").trim();
+    const roleVal = String(regRole || "Video Editor").trim() || "Video Editor";
+
+    if (!nameVal || !emailVal || !passVal) {
+      setAuthError("Nama lengkap, email, dan kata sandi wajib diisi.");
+      return;
+    }
+
+    if (passVal.length < 6) {
+      setAuthError("Kata sandi minimal 6 karakter.");
+      return;
+    }
+
+    setSubmittingAuth(true);
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, emailVal, passVal);
+      const uid = cred?.user?.uid || "";
+
+      const newProfile = {
+        uid,
+        name: nameVal,
+        email: emailVal,
+        role: normalizeTeamRole(roleVal, "Brand Manager"),
+        whatsapp: whatsappVal,
+      };
+
+      if (uid && typeof setDoc === "function" && typeof doc === "function" && typeof db !== "undefined" && db) {
+        await setDoc(
+          doc(db, "teamUsers", uid),
+          {
+            ...newProfile,
+            createdAt: typeof serverTimestamp === "function" ? serverTimestamp() : new Date().toISOString(),
+            updatedAt: typeof serverTimestamp === "function" ? serverTimestamp() : new Date().toISOString(),
+          },
+          { merge: true }
+        );
+      }
+
+      setCurrentUser((prev) => ({
+        ...(prev?.uid === uid ? prev : {}),
+        id: uid,
+        ...newProfile,
+      }));
+      setRegName("");
+      setRegEmail("");
+      setRegPassword("");
+      setRegWhatsapp("");
+      setAuthMode("login");
+    } catch (err) {
+      console.error("Pendaftaran akun tim gagal:", err);
+      setAuthError(err?.message || "Gagal mendaftarkan akun tim. Coba periksa kembali data Anda.");
+    } finally {
+      setSubmittingAuth(false);
+    }
+  };
+
+    const openTiktokAccountManager = (accountOrId = null, tab = "monitoring") => {
+    const accountsList = Array.isArray(tiktokAccounts) ? tiktokAccounts : [];
+    const targetAccount =
+      typeof accountOrId === "string"
+        ? accountsList.find(
+            (acc) => String(acc?.id || "") === accountOrId || String(acc?.docId || "") === accountOrId
+          ) || null
+        : accountOrId;
+
+    const resolvedId =
+      typeof accountOrId === "string"
+        ? accountOrId
+        : targetAccount?.id || targetAccount?.docId || null;
+
+    if (typeof setActiveTiktokAccountId === "function") {
+      setActiveTiktokAccountId(resolvedId);
+    }
+    if (typeof setTiktokDrawerTab === "function") {
+      setTiktokDrawerTab(tab === "edit" ? "edit" : "monitoring");
+    }
+    if (!resolvedId && typeof setIsAddTiktokModalOpen === "function") {
+      setIsAddTiktokModalOpen(true);
+      return;
+    }
+
+    if (targetAccount) {
+      const brandVal = targetAccount.brandName || targetAccount.brand || "";
+      const accNameVal =
+        targetAccount.accountName || targetAccount.tiktokAccountName || targetAccount.handle || "";
+      const rawTypes = Array.isArray(targetAccount.contentTypes)
+        ? targetAccount.contentTypes
+        : Array.isArray(targetAccount.selectedTypes)
+        ? targetAccount.selectedTypes
+        : [];
+      const cleanTypes =
+        typeof sanitizeContentTypes === "function"
+          ? sanitizeContentTypes(rawTypes)
+          : rawTypes.filter(Boolean);
+
+      if (typeof setEditTtBrandName === "function") setEditTtBrandName(String(brandVal));
+      if (typeof setEditTtAccountName === "function") setEditTtAccountName(String(accNameVal));
+      if (typeof setEditTtSelectedTypes === "function") setEditTtSelectedTypes(cleanTypes);
+      const logoVal = targetAccount.logoUrl || targetAccount.brandLogo || "";
+      if (typeof setEditTtBrandLogo === "function") setEditTtBrandLogo(String(logoVal));
+      if (typeof setEditTtCustomType === "function") setEditTtCustomType("");
+    }
+  };
+
+    const handleUpdateTiktokAccountDetail = async (eOrPayload, maybeUpdates = null) => {
+    if (eOrPayload && typeof eOrPayload.preventDefault === "function") {
+      eOrPayload.preventDefault();
+    }
+    const targetAccount =
+      eOrPayload && typeof eOrPayload === "object" && !eOrPayload.preventDefault
+        ? eOrPayload
+        : (typeof activeTiktokAccount !== "undefined" ? activeTiktokAccount : null);
+    const resolvedDocId = targetAccount?.docId || targetAccount?.id;
+    if (!resolvedDocId) return;
+
+    const cleanBrand =
+      typeof editTtBrandName !== "undefined"
+        ? String(editTtBrandName || "").trim()
+        : String(targetAccount?.brandName || targetAccount?.brand || "").trim();
+    const cleanAccount =
+      typeof editTtAccountName !== "undefined"
+        ? String(editTtAccountName || "").trim()
+        : String(targetAccount?.accountName || targetAccount?.tiktokAccountName || targetAccount?.handle || "").trim();
+    const rawTypes = Array.isArray(editTtSelectedTypes)
+      ? editTtSelectedTypes
+      : Array.isArray(targetAccount?.contentTypes)
+      ? targetAccount.contentTypes
+      : [];
+    const cleanTypes =
+      typeof sanitizeContentTypes === "function" ? sanitizeContentTypes(rawTypes) : rawTypes;
+    const cleanLogo =
+      typeof editTtBrandLogo !== "undefined"
+        ? String(editTtBrandLogo || "").trim()
+        : String(targetAccount?.logoUrl || targetAccount?.brandLogo || "").trim();
+
+    const updates =
+      maybeUpdates && typeof maybeUpdates === "object"
+        ? maybeUpdates
+        : {
+            brandName: cleanBrand,
+            accountName: cleanAccount,
+            contentTypes: cleanTypes,
+            selectedTypes: cleanTypes,
+            logoUrl: cleanLogo,
+            brandLogo: cleanLogo,
+            ...(typeof editTiktokHandle !== "undefined" ? { handle: String(editTiktokHandle || "").trim() } : {}),
+            ...(typeof editTiktokPic !== "undefined" ? { picName: String(editTiktokPic || "").trim() } : {}),
+            ...(typeof editTiktokNotes !== "undefined" ? { notes: String(editTiktokNotes || "").trim() } : {}),
+            updatedAt: new Date().toISOString(),
+          };
+
+    try {
+      const ref = doc(db, "tiktokAccounts", resolvedDocId);
+      try {
+        await updateDoc(ref, updates);
+      } catch (updateErr) {
+        if (
+          String(updateErr?.code || "").includes("not-found") ||
+          String(updateErr?.message || "").includes("No document to update")
+        ) {
+          await setDoc(ref, { id: targetAccount?.id || resolvedDocId, ...updates }, { merge: true });
+        } else {
+          throw updateErr;
+        }
+      }
+
+      if (typeof setTiktokAccounts === "function") {
+        setTiktokAccounts((prev) => {
+          const safePrev = Array.isArray(prev) ? prev : [];
+          const mapped = safePrev.map((acc) => {
+            const accId = acc?.docId || acc?.id;
+            if (accId !== resolvedDocId) return acc;
+            return {
+              ...acc,
+              ...updates,
+              logoUrl: updates.logoUrl !== undefined ? updates.logoUrl : acc.logoUrl,
+              brandLogo: updates.brandLogo !== undefined ? updates.brandLogo : acc.brandLogo,
+            };
+          });
+          try {
+            localStorage.setItem("cf_tiktok_accounts", JSON.stringify(mapped));
+          } catch {}
+          return mapped;
+        });
+      }
+
+      // Tutup popup Edit Akun setelah berhasil disimpan agar langsung kembali ke dasbor
+      if (typeof setActiveTiktokAccountId === "function") {
+        setActiveTiktokAccountId(null);
+      }
+      if (typeof setTiktokDrawerTab === "function") {
+        setTiktokDrawerTab("monitoring");
+      }
+    } catch (err) {
+      console.error("Gagal memperbarui detail akun TikTok:", err);
+      alert(err?.message || "Gagal menyimpan perubahan akun TikTok.");
+    }
+  };
+
+  const isOrderMatchedToTiktokAccount = (order, account) => {
+    if (!order || !account) return false;
+
+    const norm = (v) =>
+      String(v || "")
+        .trim()
+        .toLowerCase()
+        .replace(/^@+/, "");
+
+    const accIds = [account.id, account.docId]
+      .filter(Boolean)
+      .map((v) => String(v).trim().toLowerCase());
+    const orderAccId = String(order.tiktokAccountId || order.accountId || "")
+      .trim()
+      .toLowerCase();
+    if (orderAccId && accIds.includes(orderAccId)) return true;
+
+    const accKeys = new Set(
+      [account.accountName, account.tiktokAccountName, account.brandName]
+        .map(norm)
+        .filter(Boolean)
+    );
+    const orderKeys = [order.accountName, order.tiktokAccountName, order.brand]
+      .map(norm)
+      .filter(Boolean);
+
+    if (accKeys.size === 0 || orderKeys.length === 0) return false;
+    return orderKeys.some((k) => accKeys.has(k));
+  };
+
+  const editors = useMemo(() => {
+    const list = Array.isArray(teamUsers) ? teamUsers : [];
+    return list.filter((u) => {
+      const r = String(u?.role || "").toLowerCase();
+      return r.includes("editor");
+    });
+  }, [teamUsers]);
+
+    const activeTiktokAccount = useMemo(() => {
+    if (!activeTiktokAccountId || !Array.isArray(tiktokAccounts)) return null;
+    return tiktokAccounts.find((acc) => acc.id === activeTiktokAccountId) || null;
+  }, [tiktokAccounts, activeTiktokAccountId]);
+
+    const availableContentTypes = useMemo(() => {
+    const raw =
+      (typeof activeTiktokAccount !== "undefined" && Array.isArray(activeTiktokAccount?.contentTypes) && activeTiktokAccount.contentTypes.length > 0
+        ? activeTiktokAccount.contentTypes
+        : null) ||
+      (typeof editTtSelectedTypes !== "undefined" && Array.isArray(editTtSelectedTypes) && editTtSelectedTypes.length > 0
+        ? editTtSelectedTypes
+        : null) ||
+      (Array.isArray(tiktokAccounts) ? tiktokAccounts.flatMap((a) => a?.contentTypes || []) : []);
+    const cleaned = typeof sanitizeContentTypes === "function" ? sanitizeContentTypes(raw) : raw;
+    const unique = Array.from(new Set((Array.isArray(cleaned) ? cleaned : []).filter(Boolean)));
+    return unique.length > 0 ? unique : ["UGC", "Review", "Edukasi", "Hard Selling"];
+  }, [activeTiktokAccount, editTtSelectedTypes, tiktokAccounts]);
+
+    const mainFilteredOrders = useMemo(() => {
+    const list = Array.isArray(orders) ? orders : [];
+    const q = String(typeof searchQuery !== "undefined" ? searchQuery : "").trim().toLowerCase();
+    const stFilter = typeof statusFilter !== "undefined" ? statusFilter : "Semua";
+    const pfFilter = typeof platformFilter !== "undefined" ? platformFilter : "Semua";
+
+    const roleStr = String(
+      (typeof currentUser !== "undefined" && currentUser?.role) ||
+        (typeof activeRole !== "undefined" ? activeRole : "") ||
+        ""
+    )
+      .trim()
+      .toLowerCase();
+    const bmRole =
+      roleStr.includes("brand manager") ||
+      roleStr.includes("brand management") ||
+      roleStr === "manager" ||
+      roleStr === "admin" ||
+      roleStr === "owner";
+    const edRole = roleStr.includes("editor");
+
+    return list.filter((order) => {
+      if (!order) return false;
+      const st = String(order.status || "").trim();
+      const isAlreadyPosted =
+        Boolean(order.isPosted) ||
+        Boolean(order.postedAt) ||
+        st.toLowerCase() === "sudah diposting" ||
+        st.toLowerCase() === "sudah diupload" ||
+        st.toLowerCase() === "sudah di-upload";
+
+      if (bmRole) {
+        const isSuperView = roleStr === "admin" || roleStr === "owner";
+        if (!isSuperView) {
+          const myUid = String(currentUser?.uid || currentUser?.id || "").trim().toLowerCase();
+          const myEmail = String(currentUser?.email || "").trim().toLowerCase();
+          const myName = String(currentUser?.name || currentUser?.fullName || "").trim().toLowerCase();
+          const orderUid = String(order?.requestedByUid || order?.createdByUid || "").trim().toLowerCase();
+          const orderEmail = String(order?.requestedByEmail || order?.createdByEmail || "").trim().toLowerCase();
+          const orderName = String(order?.requestedBy || order?.createdBy || "").trim().toLowerCase();
+
+          const matchesUid = Boolean(myUid && orderUid && myUid === orderUid);
+          const matchesEmail = Boolean(myEmail && orderEmail && myEmail === orderEmail);
+          const matchesName = Boolean(myName && orderName && myName === orderName);
+          const hasAnyOwnerMeta = Boolean(orderUid || orderEmail || orderName);
+
+          if (!hasAnyOwnerMeta || (!matchesUid && !matchesEmail && !matchesName)) {
+            return false;
+          }
+        }
+      } else if (edRole) {
+        const isEditorQueueOrRevision =
+          st === "Antrean" || st === "Sedang Dikerjakan" || st === "Revisi";
+        if (!isEditorQueueOrRevision) return false;
+      }
+
+      const matchesSearch =
+        !q ||
+        String(order.title || "").toLowerCase().includes(q) ||
+        String(order.brand || "").toLowerCase().includes(q) ||
+        String(order.accountName || "").toLowerCase().includes(q) ||
+        String(order.id || "").toLowerCase().includes(q);
+      const matchesStatus = !stFilter || stFilter === "Semua" || st === stFilter;
+      const matchesPlatform = !pfFilter || pfFilter === "Semua" || order.platform === pfFilter;
+      return matchesSearch && matchesStatus && matchesPlatform;
+    });
+  }, [orders, searchQuery, statusFilter, platformFilter, currentUser]);
+
+  const isOrderOwnedByCurrentAccount = (order) => {
+    const roleStr = String(currentUser?.role || "").trim().toLowerCase();
+    const isBm =
+      roleStr.includes("brand manager") ||
+      roleStr.includes("brand management") ||
+      roleStr === "manager" ||
+      roleStr === "admin" ||
+      roleStr === "owner";
+    if (!isBm) {
+      if (roleStr.includes("editor") && typeof currentUser !== "undefined" && currentUser) {
+        return isOrderVisibleToCurrentEditor(order, currentUser);
+      }
+      return true;
+    }
+
+    const myUid = String(currentUser?.uid || currentUser?.id || "").trim();
+    const myEmail = String(currentUser?.email || "").trim().toLowerCase();
+    const myName = String(currentUser?.name || "").trim().toLowerCase();
+    const orderUid = String(order?.requestedByUid || "").trim();
+    const orderEmail = String(order?.requestedByEmail || "").trim().toLowerCase();
+    const orderReqBy = String(order?.requestedBy || "").trim().toLowerCase();
+
+    if (orderUid) return Boolean(myUid && orderUid === myUid);
+    if (orderEmail) return Boolean(myEmail && orderEmail === myEmail);
+    if (orderReqBy) return Boolean((myName && orderReqBy === myName) || (myEmail && orderReqBy === myEmail));
+    return false;
+  };
+
+    const filteredOrders = useMemo(() => (Array.isArray(orders) ? orders : []).filter((order) => {
+    if (!isOrderOwnedByCurrentAccount(order)) return false;
     const q = searchQuery.toLowerCase();
     const matchesSearch = (order.title || "").toLowerCase().includes(q) || (order.brand || "").toLowerCase().includes(q) || (order.id || "").toLowerCase().includes(q);
     return matchesSearch && (statusFilter === "Semua" || order.status === statusFilter) && (platformFilter === "Semua" || order.platform === platformFilter);
-  }), [orders, searchQuery, statusFilter, platformFilter]);
+  }), [orders, searchQuery, statusFilter, platformFilter, currentUser]);
 
-  const stats = useMemo(() => ({
-    total: (orders?.length ?? 0),
-    queue: (Array.isArray(orders) ? orders.filter((o) => o.status === "Antrean").length : 0),
-    inProgress: (Array.isArray(orders) ? orders.filter((o) => o.status === "Sedang Dikerjakan" || o.status === "Revisi").length : 0),
-    reviewDone: (Array.isArray(orders) ? orders.filter((o) => o.status === "Review" || o.status === "Selesai").length : 0),
-  }), [orders]);
+  const normalizedRole = String((typeof currentUser !== "undefined" && currentUser?.role) || "").trim().toLowerCase();
+  const isBrandManager = normalizedRole.includes("brand manager") ||
+    normalizedRole === "manager" ||
+    normalizedRole === "admin" ||
+    normalizedRole === "owner";
+  const isEditor = normalizedRole.includes("editor");
 
-  if (authLoading) {
+    const scopedOrdersForStats = useMemo(
+    () => (Array.isArray(orders) ? orders.filter((o) => isOrderOwnedByCurrentAccount(o)) : []),
+    [orders, currentUser]
+  );
+
+    const stats = useMemo(() => ({
+    total: (scopedOrdersForStats?.length ?? 0),
+    queue: scopedOrdersForStats.filter((o) => o.status === "Antrean").length,
+    inProgress: scopedOrdersForStats.filter((o) => o.status === "Sedang Dikerjakan" || o.status === "Revisi").length,
+    reviewDone: scopedOrdersForStats.filter((o) => o.status === "Review" || o.status === "Selesai").length,
+  }), [scopedOrdersForStats]);
+
+  const productivityData = useMemo(() => {
+    const rawOrders = Array.isArray(orders) ? orders : [];
+    const roleStr = String(currentUser?.role || "").trim().toLowerCase();
+    const isAdminOrOwner = roleStr === "admin" || roleStr === "owner";
+    const isBmUser =
+      roleStr.includes("brand manager") ||
+      roleStr.includes("brand management") ||
+      roleStr === "manager";
+    const isEditorUser = roleStr.includes("editor");
+
+    const myUid = String(currentUser?.uid || currentUser?.id || "").trim().toLowerCase();
+    const myEmail = String(currentUser?.email || "").trim().toLowerCase();
+    const myName = String(currentUser?.name || currentUser?.fullName || "").trim().toLowerCase();
+
+    const matchesCurrentBm = (order) => {
+      const oUid = String(order?.requestedByUid || order?.createdByUid || "").trim().toLowerCase();
+      const oEmail = String(order?.requestedByEmail || order?.createdByEmail || "").trim().toLowerCase();
+      const oName = String(order?.requestedBy || order?.createdBy || "").trim().toLowerCase();
+      return (
+        Boolean(myUid && oUid && myUid === oUid) ||
+        Boolean(myEmail && oEmail && myEmail === oEmail) ||
+        Boolean(myName && oName && myName === oName)
+      );
+    };
+
+    const matchesCurrentEditor = (order) => {
+      const fields = [
+        order?.assignedEditor,
+        order?.editorName,
+        order?.claimedBy,
+        order?.submittedBy,
+      ]
+        .map((v) => String(v || "").trim().toLowerCase())
+        .filter(Boolean);
+      const assignedEmail = String(order?.assignedEditorEmail || "").trim().toLowerCase();
+      const assignedUid = String(order?.assignedEditorUid || "").trim().toLowerCase();
+
+      return (
+        Boolean(myUid && assignedUid && myUid === assignedUid) ||
+        Boolean(myEmail && assignedEmail && myEmail === assignedEmail) ||
+        (Boolean(myName) && fields.some((f) => f === myName || f.includes(myName))) ||
+        (Boolean(myEmail) && fields.some((f) => f.includes(myEmail)))
+      );
+    };
+
+    const scopedOrders = isAdminOrOwner
+      ? rawOrders
+      : rawOrders.filter((order) => {
+          if (!order) return false;
+          if (isBmUser && !isEditorUser) return matchesCurrentBm(order);
+          if (isEditorUser && !isBmUser) return matchesCurrentEditor(order);
+          return matchesCurrentBm(order) || matchesCurrentEditor(order);
+        });
+
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const cutoffMs =
+      productivityRange === "today"
+        ? new Date(new Date().setHours(0, 0, 0, 0)).getTime()
+        : productivityRange === "7d"
+        ? now - 7 * dayMs
+        : productivityRange === "30d"
+        ? now - 30 * dayMs
+        : 0;
+
+    const filteredByPeriod = scopedOrders.filter((order) => {
+      if (!cutoffMs) return true;
+      const rawDate =
+        order?.createdAt ||
+        order?.submittedAt ||
+        order?.completedAt ||
+        order?.updatedAt ||
+        "";
+      const parsed = Date.parse(rawDate);
+      if (Number.isNaN(parsed)) return true;
+      return parsed >= cutoffMs;
+    });
+
+    const editorMap = new Map();
+    const bmMap = new Map();
+
+    const ensureBucket = (map, key, label, roleLabel) => {
+      const cleanKey = String(key || "").trim().toLowerCase();
+      if (!cleanKey) return null;
+      if (!map.has(cleanKey)) {
+        map.set(cleanKey, {
+          key: cleanKey,
+          name: String(label || key).trim(),
+          role: roleLabel,
+          total: 0,
+          queue: 0,
+          inProgress: 0,
+          review: 0,
+          revision: 0,
+          completed: 0,
+        });
+      }
+      return map.get(cleanKey);
+    };
+
+    const applyStatusCount = (bucket, order) => {
+      if (!bucket) return;
+      const st = String(order?.status || "").trim();
+      const posted =
+        Boolean(order?.isPosted) ||
+        Boolean(order?.postedAt) ||
+        st.toLowerCase() === "sudah diposting" ||
+        st.toLowerCase() === "sudah diupload";
+
+      bucket.total += 1;
+      if (st === "Selesai" || posted) {
+        bucket.completed += 1;
+      } else if (st === "Review") {
+        bucket.review += 1;
+      } else if (st === "Revisi") {
+        bucket.revision += 1;
+      } else if (st === "Sedang Dikerjakan") {
+        bucket.inProgress += 1;
+      } else {
+        bucket.queue += 1;
+      }
+    };
+
+    filteredByPeriod.forEach((order) => {
+      const bmLabel = String(order?.requestedBy || order?.requestedByEmail || "").trim();
+      const bmKey = String(order?.requestedByUid || order?.requestedByEmail || bmLabel).trim();
+      if (bmKey && (!isEditorUser || isAdminOrOwner)) {
+        const bmBucket = ensureBucket(bmMap, bmKey, bmLabel || bmKey, "Brand Management");
+        applyStatusCount(bmBucket, order);
+      }
+
+      const edLabel = String(
+        order?.assignedEditor || order?.submittedBy || order?.claimedBy || ""
+      ).trim();
+      const edKey = String(
+        order?.assignedEditorUid || order?.assignedEditorEmail || edLabel
+      ).trim();
+      if (edKey && (!isBmUser || isAdminOrOwner)) {
+        const edBucket = ensureBucket(editorMap, edKey, edLabel || edKey, "Video Editor");
+        applyStatusCount(edBucket, order);
+      }
+    });
+
+    const q = String(productivitySearch || "").trim().toLowerCase();
+    const combined = [
+      ...(productivityRoleFilter === "Brand Management" ? [] : Array.from(editorMap.values())),
+      ...(productivityRoleFilter === "Video Editor" ? [] : Array.from(bmMap.values())),
+    ]
+      .filter((item) => (!q ? true : item.name.toLowerCase().includes(q)))
+      .map((item) => {
+        const rate = item.total > 0 ? Math.round((item.completed / item.total) * 100) : 0;
+        return { ...item, completionRate: rate };
+      })
+      .sort((a, b) => b.completed - a.completed || b.total - a.total || a.name.localeCompare(b.name));
+
+    const summary = filteredByPeriod.reduce(
+      (acc, order) => {
+        const st = String(order?.status || "").trim();
+        const posted =
+          Boolean(order?.isPosted) ||
+          Boolean(order?.postedAt) ||
+          st.toLowerCase() === "sudah diposting" ||
+          st.toLowerCase() === "sudah diupload";
+        acc.total += 1;
+        if (st === "Selesai" || posted) acc.completed += 1;
+        else if (st === "Review") acc.review += 1;
+        else if (st === "Revisi") acc.revision += 1;
+        else acc.active += 1;
+        return acc;
+      },
+      { total: 0, completed: 0, review: 0, revision: 0, active: 0 }
+    );
+
+    return {
+      isAdminOrOwner,
+      rows: combined,
+      summary,
+      completionRate: summary.total > 0 ? Math.round((summary.completed / summary.total) * 100) : 0,
+    };
+  }, [orders, currentUser, productivityRange, productivityRoleFilter, productivitySearch]);
+
+  useEffect(() => {
+    let active = true;
+    const fallbackTimer = setTimeout(() => {
+      if (active) {
+        setAuthLoading(false);
+      }
+    }, 4000);
+
+    let unsubscribe = () => {};
+    try {
+      unsubscribe = onAuthStateChanged(
+        auth,
+        async (user) => {
+          if (!active) return;
+          try {
+            if (!user) {
+              setCurrentUser(null);
+              return;
+            }
+            let profileData = {};
+            try {
+              const snap = await getDoc(doc(db, "teamUsers", user.uid));
+              if (snap.exists()) {
+                profileData = snap.data() || {};
+              }
+            } catch (profileErr) {
+              console.warn("Gagal memuat profil teamUsers, lanjut dengan data Auth:", profileErr);
+            }
+            if (!active) return;
+            setCurrentUser((prev) => {
+              const sameUser = prev && (prev.uid === user.uid || prev.id === user.uid);
+              return {
+                ...(sameUser ? prev : {}),
+                id: user.uid,
+                uid: user.uid,
+                ...profileData,
+                email: user.email || profileData.email || (sameUser ? prev.email : "") || "",
+                name: profileData.name || (sameUser ? prev.name : "") || user.displayName || (user.email ? user.email.split("@")[0] : "Pengguna"),
+                role: normalizeTeamRole(profileData.role || (sameUser ? prev.role : ""), "Brand Manager"),
+                whatsapp: profileData.whatsapp || (sameUser ? prev.whatsapp : "") || "",
+              };
+            });
+          } catch (authErr) {
+            console.error("Error saat memproses status autentikasi:", authErr);
+            if (active) {
+              setCurrentUser(null);
+            }
+          } finally {
+            if (active) {
+              setAuthLoading(false);
+            }
+          }
+        },
+        (listenerErr) => {
+          console.error("Listener onAuthStateChanged gagal:", listenerErr);
+          if (active) {
+            setCurrentUser(null);
+            setAuthLoading(false);
+          }
+        }
+      );
+    } catch (initErr) {
+      console.error("Gagal menginisialisasi onAuthStateChanged:", initErr);
+      setAuthLoading(false);
+    }
+
+    return () => {
+      active = false;
+      clearTimeout(fallbackTimer);
+      try {
+        unsubscribe();
+      } catch {}
+    };
+  }, []);
+
+  useEffect(() => {
+    setEditWaNumber(resolveCurrentUserWhatsApp(currentUser, teamUsers));
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    let unsubOrders = null;
+    let unsubTiktok = null;
+
+    try {
+      unsubOrders = onSnapshot(
+        collection(db, "orders"),
+        (snap) => {
+          const rows = snap.docs.map((d) => {
+            const data = d.data() || {};
+            return {
+              docId: d.id,
+              id: data.id || d.id,
+              ...data,
+            };
+          });
+          const seenOrderKeys = new Set();
+          const uniqueRows = rows.filter((item) => {
+            const keys = [item?.docId, item?.id].map((k) => (k ? String(k) : "")).filter(Boolean);
+            if (keys.some((k) => seenOrderKeys.has(k))) return false;
+            keys.forEach((k) => seenOrderKeys.add(k));
+            return true;
+          });
+          setOrders(uniqueRows);
+        },
+        (err) => {
+          console.error("Error memuat orders:", err);
+        }
+      );
+    } catch (err) {
+      console.error("Gagal pasang listener orders:", err);
+    }
+
+    try {
+      if (typeof setTiktokAccounts === "function") {
+        unsubTiktok = onSnapshot(
+          collection(db, "tiktokAccounts"),
+          (snap) => {
+            const firestoreRows = snap.docs.map((d) => {
+              const data = d.data() || {};
+              return {
+                docId: d.id,
+                id: data.id || d.id,
+                brandName: data.brandName || data.brand || data.accountName || "",
+                accountName: data.accountName || data.brandName || d.id,
+                contentTypes: Array.isArray(data.contentTypes)
+                  ? data.contentTypes
+                  : Array.isArray(data.selectedTypes)
+                  ? data.selectedTypes
+                  : [],
+                ...data,
+              };
+            });
+
+            let localRows = [];
+            try {
+              const parsed = JSON.parse(localStorage.getItem("cf_tiktok_accounts") || "[]");
+              if (Array.isArray(parsed)) localRows = parsed;
+            } catch {}
+
+            setTiktokAccounts((prev) => {
+              const baseList = [
+                ...(Array.isArray(prev) ? prev : []),
+                ...localRows,
+              ];
+              const byKey = new Map();
+
+              for (const item of baseList) {
+                if (!item) continue;
+                const key = String(item.docId || item.id || item.accountName || "").toLowerCase();
+                if (!key) continue;
+                byKey.set(key, item);
+              }
+
+              for (const fItem of firestoreRows) {
+                const key = String(fItem.docId || fItem.id || fItem.accountName || "").toLowerCase();
+                const byHandle = String(fItem.accountName || "").toLowerCase();
+                if (byHandle) {
+                  for (const [existingKey, existingVal] of byKey.entries()) {
+                    if (String(existingVal?.accountName || "").toLowerCase() === byHandle) {
+                      byKey.delete(existingKey);
+                    }
+                  }
+                }
+                if (key) {
+                  const prevMatch = byKey.get(key) || {};
+                  byKey.set(key, { ...prevMatch, ...fItem });
+                }
+              }
+
+              const merged = Array.from(byKey.values());
+              try {
+                localStorage.setItem("cf_tiktok_accounts", JSON.stringify(merged));
+              } catch {}
+              return merged;
+            });
+          },
+          (err) => {
+            console.error("Gagal memuat tiktokAccounts:", err);
+          }
+        );
+      }
+    try {
+      const usersUnsub = onSnapshot(
+        collection(db, "teamUsers"),
+        (snap) => {
+          const rows = snap.docs.map((d) => ({
+            id: d.id,
+            docId: d.id,
+            ...d.data(),
+          }));
+          if (typeof setTeamUsers === "function") {
+            setTeamUsers(rows);
+          }
+        },
+        (err) => {
+          console.error("Listener teamUsers error:", err);
+        }
+      );
+
+    } catch (err) {
+      console.error("Gagal pasang listener teamUsers:", err);
+    }
+
+    } catch (err) {
+      console.error("Gagal pasang listener tiktokAccounts:", err);
+    }
+
+    return () => {
+      if (typeof unsubOrders === "function") unsubOrders();
+      if (typeof unsubTiktok === "function") unsubTiktok();
+      if (typeof usersUnsub === "function") usersUnsub();
+    };
+  }, [currentUser]);
+
+
+  const matchedOrderTiktokAccount = useMemo(() => {
+    const q = String(typeof newBrand !== "undefined" ? newBrand : "").trim().toLowerCase();
+    if (!q || !Array.isArray(tiktokAccounts)) return null;
     return (
-      <div className="min-h-screen text-slate-900" style={{ backgroundImage: "linear-gradient(135deg, rgba(186, 230, 253, 0.45) 0%, rgba(240, 249, 255, 0.75) 50%, rgba(253, 230, 138, 0.42) 100%)" }}>
-        Menghubungkan ke CreativeFlow Studio Cloud...
+      tiktokAccounts.find((acc) => {
+        const aName = String(acc?.accountName || "").trim().toLowerCase();
+        const bName = String(acc?.brandName || "").trim().toLowerCase();
+        return aName === q || bName === q;
+      }) || null
+    );
+  }, [newBrand, tiktokAccounts]);
+
+  const orderModalContentTypes = useMemo(() => {
+    if (!matchedOrderTiktokAccount) return [];
+    const rawList = Array.isArray(matchedOrderTiktokAccount.contentTypes)
+      ? matchedOrderTiktokAccount.contentTypes
+      : [];
+    const cleaned = typeof sanitizeContentTypes === "function" ? sanitizeContentTypes(rawList) : rawList;
+    return Array.from(
+      new Set((Array.isArray(cleaned) ? cleaned : []).map((x) => String(x || "").trim()).filter(Boolean))
+    );
+  }, [matchedOrderTiktokAccount]);
+
+  const handleCreateOrder = async (e) => {
+    if (e && typeof e.preventDefault === "function") e.preventDefault();
+    if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+    if (typeof window !== "undefined") {
+      if (window.__cfCreatingOrder) return;
+      window.__cfCreatingOrder = true;
+    }
+    const releaseOrderLock = () => {
+      if (typeof window !== "undefined") window.__cfCreatingOrder = false;
+    };
+    const cleanBrand = String(typeof newBrand !== "undefined" ? newBrand : "").trim();
+    const rawTitle = String(typeof newTitle !== "undefined" ? newTitle : "").trim();
+    const cleanType = String(
+      typeof newContentType !== "undefined" && newContentType
+        ? newContentType
+        : ((Array.isArray(orderModalContentTypes) && orderModalContentTypes[0]) || "")
+    ).trim();
+    const cleanTitle = rawTitle || (cleanBrand ? cleanBrand + " - " + cleanType : "");
+
+    if (!cleanBrand || !cleanTitle) {
+      alert("Pilih akun TikTok terdaftar dan isi judul order terlebih dahulu.");
+      return;
+    }
+
+    const rawCount = Number(typeof batchCount !== "undefined" ? batchCount : 1);
+    const totalBatch = Number.isFinite(rawCount)
+      ? Math.min(20, Math.max(1, Math.floor(rawCount)))
+      : 1;
+    const batchId = totalBatch > 1 ? "BATCH-" + Date.now() : "";
+    const baseOrderId = "ORD-" + Date.now();
+    const createdOrders = [];
+
+    try {
+      for (let idx = 0; idx < totalBatch; idx += 1) {
+        const itemNumber = idx + 1;
+        const itemTitle =
+          totalBatch > 1 ? `[${itemNumber}/${totalBatch}] ${cleanTitle}` : cleanTitle;
+
+        const itemOrder = {
+          id: totalBatch > 1 ? `${baseOrderId}-${itemNumber}` : baseOrderId,
+          batchId,
+          batchIndex: totalBatch > 1 ? itemNumber : 1,
+          batchTotal: totalBatch,
+          title: itemTitle,
+          baseTitle: cleanTitle,
+          brand: cleanBrand,
+          accountName: cleanBrand,
+          platform: "TikTok",
+          contentType: cleanType,
+          type: cleanType,
+          brief: String(typeof newBrief !== "undefined" ? newBrief : "").trim(),
+          rawFootageUrl: String(typeof newRawFootageUrl !== "undefined" ? newRawFootageUrl : "").trim(),
+          referenceUrl: String(typeof newReferenceUrl !== "undefined" ? newReferenceUrl : "").trim(),
+          deadline: String(typeof newDeadline !== "undefined" ? newDeadline : "").trim(),
+          priority: String(typeof newPriority !== "undefined" && newPriority ? newPriority : "Normal").trim(),
+          assignedEditor: String(typeof newAssignedEditor !== "undefined" ? newAssignedEditor : "").trim(),
+          status: "Antrean",
+          isPosted: false,
+          requestedByUid: currentUser?.uid || currentUser?.id || "",
+          requestedByEmail: String(currentUser?.email || "").trim().toLowerCase(),
+          requestedBy: currentUser?.name || currentUser?.email || "Brand Manager",
+          requestedByRole: currentUser?.role || "Brand Manager",
+          createdAt: new Date().toISOString(),
+        };
+
+        if (typeof db !== "undefined" && typeof addDoc === "function" && typeof collection === "function") {
+          const docRef = await addDoc(collection(db, "orders"), itemOrder);
+          itemOrder.docId = docRef.id;
+        }
+        createdOrders.push(itemOrder);
+      }
+
+      const newOrderItem = createdOrders[0] || null;
+      if (!newOrderItem) return;
+      if (typeof pushWaNotification === "function" && typeof formatWaOrderMessage === "function") {
+        const specificEditor = String(newOrderItem.assignedEditor || "").trim();
+        const orderNote = newOrderItem.brief || "-";
+        const editorRecipients = [];
+
+        if (specificEditor) {
+          editorRecipients.push(specificEditor);
+        } else {
+          const allEditorNames = Array.from(
+            new Set(
+              [
+                ...(Array.isArray(editors) ? editors : []),
+                ...(Array.isArray(teamUsers) ? teamUsers : []),
+              ]
+                .filter((m) => {
+                  if (!m) return false;
+                  const r = String(m?.role || "").trim().toLowerCase();
+                  return r.includes("editor");
+                })
+                .map((m) => String(m?.name || m?.fullName || m?.email || "").trim())
+                .filter(Boolean)
+            )
+          );
+          editorRecipients.push(...allEditorNames);
+        }
+
+        for (const edRecipient of editorRecipients) {
+          await pushWaNotification({
+            event: "Orderan Baru Masuk Antrean",
+            targetName: edRecipient,
+            phone: typeof resolveTeamWhatsApp === "function" ? resolveTeamWhatsApp(edRecipient) : "",
+            message: formatWaOrderMessage({
+              recipientName: edRecipient,
+              order: newOrderItem,
+              note: orderNote,
+              statusLabel: "Dalam Antrean",
+              closing: "Ada orderan video baru dari Brand Manager yang masuk ke antrean ya. Silakan dicek detail dan brief-nya!",
+            }),
+          });
+        }
+      }
+      if (typeof setNewTitle === "function") setNewTitle("");
+      if (typeof setBatchCount === "function") setBatchCount(1);
+      if (typeof setNewContentType === "function") setNewContentType("");
+      if (typeof setNewBrief === "function") setNewBrief("");
+      if (typeof setNewRawFootageUrl === "function") setNewRawFootageUrl("");
+      if (typeof setNewReferenceUrl === "function") setNewReferenceUrl("");
+      if (typeof setIsNewOrderOpen === "function") setIsNewOrderOpen(false);
+    } catch (err) {
+      console.error("Gagal mengirim order video:", err);
+      alert(err?.message || "Gagal mengirim order video.");
+    } finally {
+      releaseOrderLock();
+    }
+  };
+
+
+
+  const handleOrderStatusTransition = async (orderObj, nextStatus, extraFields = {}) => {
+    if (!orderObj || !nextStatus) return;
+    const targetId = orderObj.docId || orderObj.id;
+    const payload = {
+      status: nextStatus,
+      updatedAt: new Date().toISOString(),
+      ...extraFields,
+    };
+    try {
+      if (
+        typeof db !== "undefined" &&
+        typeof doc === "function" &&
+        typeof updateDoc === "function" &&
+        targetId
+      ) {
+        await updateDoc(doc(db, "orders", String(targetId)), payload);
+      }
+      if (typeof setOrders === "function") {
+        setOrders((prev) =>
+          (Array.isArray(prev) ? prev : []).map((item) => {
+            const match =
+              (orderObj.docId && item.docId === orderObj.docId) ||
+              (orderObj.id && item.id === orderObj.id);
+            return match ? { ...item, ...payload } : item;
+          })
+        );
+      }
+    } catch (err) {
+      console.error("Gagal memperbarui status order:", err);
+      alert(err?.message || "Gagal memperbarui status order.");
+    }
+  };
+
+
+  const handleEditorStartWork = async () => {
+    const target = typeof selectedOrder !== "undefined" ? selectedOrder : null;
+    if (!target) return;
+    const editorLabel = String(currentUser?.name || currentUser?.email || "Video Editor").trim();
+    const editorEmailVal = String(currentUser?.email || "").trim().toLowerCase();
+    const editorUidVal = String(currentUser?.uid || currentUser?.id || "").trim();
+    const isReworkSubmission = String(target?.status || "").trim() === "Revisi";
+    const nextStatus = "Sedang Dikerjakan";
+    const claimPayload = {
+      editorName: editorLabel,
+      assignedEditor: editorLabel,
+      assignedEditorEmail: editorEmailVal,
+      assignedEditorUid: editorUidVal,
+      claimedBy: editorLabel,
+      claimedByEmail: editorEmailVal,
+      claimedByUid: editorUidVal,
+    };
+    if (typeof handleOrderStatusTransition === "function") {
+      await handleOrderStatusTransition(target, nextStatus, claimPayload);
+    }
+    if (typeof pushWaNotification === "function") {
+      const bmRecipient = target.requestedBy || target.creatorName || target.requestedByEmail || "";
+      if (bmRecipient) {
+        const orderCode = target?.id ? `${target.id} - ` : "";
+        const orderTitle = target?.title || "Untitled Order";
+        await pushWaNotification({
+          event: "Orderan Sedang Dikerjakan",
+          targetName: bmRecipient,
+          targetEmail: target.requestedByEmail || "",
+          targetUid: target.requestedByUid || "",
+          phone: typeof resolveTeamWhatsApp === "function" ? resolveTeamWhatsApp(bmRecipient) : "",
+          message: [
+            `Halo ${bmRecipient}, orderan ${orderCode}${orderTitle} sedang dikerjakan oleh Video Editor ${editorLabel}.`,
+            `Status: Sedang Dikerjakan`,
+            `Catatan: ${target?.brief || "-"}`,
+            `Progres pengerjaan video sudah dimulai ya.`,
+          ].join("\n"),
+        });
+      }
+    }
+
+        if (target.docId && typeof db !== "undefined" && typeof updateDoc === "function" && typeof doc === "function") {
+      try {
+        await updateDoc(doc(db, "orders", target.docId), {
+          status: nextStatus,
+          assignedEditor: editorLabel,
+          assignedEditorEmail: editorEmailVal,
+          assignedEditorUid: editorUidVal,
+          claimedBy: editorLabel,
+          claimedByEmail: editorEmailVal,
+          claimedByUid: editorUidVal,
+        });
+      } catch (err) {
+        console.error("Gagal mengunci job ke editor:", err);
+      }
+    }
+  };
+
+  const handleEditorSubmitVideo = async (e) => {
+    if (e && typeof e.preventDefault === "function") e.preventDefault();
+    const target = typeof selectedOrder !== "undefined" ? selectedOrder : null;
+    if (!target) return;
+    const cleanUrl = String(typeof editorVideoUrl !== "undefined" ? editorVideoUrl : "").trim();
+    if (!cleanUrl) {
+      alert("Masukkan link video hasil edit (MP4) terlebih dahulu.");
+      return;
+    }
+    if (typeof handleOrderStatusTransition === "function") {
+      await handleOrderStatusTransition(target, "Review", {
+        previewUrl: cleanUrl,
+        videoUrl: cleanUrl,
+        submittedBy: currentUser?.name || currentUser?.email || "Video Editor",
+        submittedAt: new Date().toISOString(),
+      });
+    }
+    if (typeof pushWaNotification === "function") {
+      const bmRecipient = target.requestedBy || target.creatorName || target.requestedByEmail || "";
+      const editorActor = String(currentUser?.name || currentUser?.email || target.assignedEditor || "Video Editor").trim();
+      const wasRevision =
+        String(target?.status || "").trim() === "Revisi" ||
+        Boolean(String(target?.revisionNote || "").trim());
+      if (bmRecipient) {
+        const orderCode = target?.id ? `${target.id} - ` : "";
+        const orderTitle = target?.title || "Untitled Order";
+        await pushWaNotification({
+          event: wasRevision ? "Orderan Sudah Direvisi" : "Editan Selesai & Siap Review",
+          targetName: bmRecipient,
+          targetEmail: target.requestedByEmail || "",
+          targetUid: target.requestedByUid || "",
+          phone: typeof resolveTeamWhatsApp === "function" ? resolveTeamWhatsApp(bmRecipient) : "",
+          message: [
+            wasRevision
+              ? `Halo ${bmRecipient}, hasil revisi untuk orderan ${orderCode}${orderTitle} sudah selesai dikerjakan oleh ${editorActor}.`
+              : `Halo ${bmRecipient}, editan untuk orderan ${orderCode}${orderTitle} sudah selesai dikerjakan oleh ${editorActor} dan siap review.`,
+            `Status: Review`,
+            `Link Video: ${cleanUrl}`,
+            wasRevision
+              ? `Perbaikan revisinya sudah dikirim ulang ya, silakan dicek kembali.`
+              : `Hasil edit sudah dikirim dan siap untuk di-review ya.`,
+          ].join("\n"),
+        });
+      }
+    }
+
+    if (typeof setEditorVideoUrl === "function") setEditorVideoUrl("");
+    if (typeof setShowEditorSubmitTab === "function") setShowEditorSubmitTab(false);
+  };
+
+    if (authLoading) {
+    return (
+      <div
+        className="min-h-screen text-slate-800 flex items-center justify-center p-4 sm:p-6"
+        style={{
+          backgroundImage:
+            "linear-gradient(135deg, rgba(186, 230, 253, 0.48) 0%, rgba(248, 250, 252, 0.9) 50%, rgba(253, 230, 138, 0.45) 100%)",
+        }}
+      >
+        <div className="w-full max-w-4xl rounded-3xl bg-white/90 backdrop-blur-md border border-sky-100/90 shadow-xl p-6 sm:p-8 space-y-6">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate-100 pb-5">
+            <div className="flex items-center gap-3.5">
+              <BrandLogo sizeClass="w-12 h-12" />
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-base sm:text-lg font-bold tracking-tight text-slate-900">
+                    CreativeFlow Studio
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-sky-50 text-sky-700 border border-sky-200/80">
+                    <span className="w-1.5 h-1.5 rounded-full bg-sky-500 animate-ping" />
+                    Cloud Sync
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Menghubungkan sesi & antrean produksi video tim...
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 self-start sm:self-auto px-3.5 py-2 rounded-2xl bg-slate-50 border border-slate-200/70 text-xs font-medium text-slate-600">
+              <span className="w-4 h-4 rounded-full border-2 border-sky-600 border-t-transparent animate-spin" />
+              <span>Memuat workspace</span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5 animate-pulse">
+            <div className="h-24 rounded-2xl bg-slate-100/90 border border-slate-200/60 p-4 flex flex-col justify-between">
+              <div className="h-3 w-20 rounded bg-slate-200" />
+              <div className="h-6 w-12 rounded bg-slate-200" />
+            </div>
+            <div className="h-24 rounded-2xl bg-slate-100/90 border border-slate-200/60 p-4 flex flex-col justify-between">
+              <div className="h-3 w-24 rounded bg-slate-200" />
+              <div className="h-6 w-12 rounded bg-slate-200" />
+            </div>
+            <div className="h-24 rounded-2xl bg-slate-100/90 border border-slate-200/60 p-4 flex flex-col justify-between">
+              <div className="h-3 w-20 rounded bg-slate-200" />
+              <div className="h-6 w-12 rounded bg-slate-200" />
+            </div>
+          </div>
+
+          <div className="space-y-2.5 animate-pulse">
+            <div className="h-12 rounded-2xl bg-slate-100/80 border border-slate-200/50" />
+            <div className="h-12 rounded-2xl bg-slate-100/70 border border-slate-200/50" />
+            <div className="h-12 rounded-2xl bg-slate-100/60 border border-slate-200/50" />
+          </div>
+        </div>
       </div>
     );
   }
@@ -1087,6 +2305,41 @@ const [newContentType, setNewContentType] = useState("");
     );
   }
 
+  const handleDeleteVideoOrder = (order) => {
+    if (!order) return;
+    if (typeof setPendingDeleteOrder === "function") {
+      setPendingDeleteOrder(order);
+    }
+  };
+
+  const confirmDeleteVideoOrder = async () => {
+    const target = pendingDeleteOrder;
+    if (!target) return;
+    const targetDocId = target.docId || target.id;
+    if (typeof setIsDeletingOrder === "function") setIsDeletingOrder(true);
+    try {
+      if (targetDocId && typeof db !== "undefined") {
+        await deleteDoc(doc(db, "orders", String(targetDocId)));
+      }
+      if (typeof setOrders === "function") {
+        setOrders((prev) =>
+          (Array.isArray(prev) ? prev : []).filter(
+            (item) => (item?.docId || item?.id) !== targetDocId
+          )
+        );
+      }
+      if (typeof setPendingDeleteOrder === "function") setPendingDeleteOrder(null);
+      if (typeof setSelectedOrderId === "function") {
+        setSelectedOrderId((curr) => (curr === targetDocId ? null : curr));
+      }
+    } catch (err) {
+      console.error("Gagal menghapus orderan video:", err);
+      alert(err?.message || "Gagal menghapus orderan video.");
+    } finally {
+      if (typeof setIsDeletingOrder === "function") setIsDeletingOrder(false);
+    }
+  };
+
   return (
     <>
     <div className="min-h-screen bg-slate-50 text-slate-800" style={{ backgroundImage: "linear-gradient(135deg, rgba(186, 230, 253, 0.45) 0%, rgba(240, 249, 255, 0.75) 50%, rgba(253, 230, 138, 0.42) 100%)" }}>
@@ -1110,7 +2363,7 @@ const [newContentType, setNewContentType] = useState("");
             </button>
             <div className="hidden md:flex flex-col items-end leading-tight">
               <span className="text-xs font-bold text-slate-800">{currentUser.name}</span>
-              <span className="text-[11px] text-sky-700 font-medium">{currentUser.role} • +{currentUser.whatsapp}</span>
+              <span className="text-[11px] text-sky-700 font-medium">{normalizeTeamRole(currentUser.role, "Brand Manager")}{resolveCurrentUserWhatsApp(currentUser, teamUsers) ? ` • +${resolveCurrentUserWhatsApp(currentUser, teamUsers)}` : " • Belum ada WA"}</span>
             </div>
             <button type="button" onClick={() => signOut(auth)} className="p-2 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-600 cursor-pointer" title="Keluar"><LogOut className="w-4 h-4" /></button>
           </div>
@@ -1132,33 +2385,290 @@ const [newContentType, setNewContentType] = useState("");
               >
                 + Tambah Akun TikTok
               </button>
-              <button type="button" onClick={() => setIsNewOrderOpen(true)} className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold transition cursor-pointer shrink-0">
+              <button type="button" onClick={() => {
+                if (typeof setNewTitle === "function") setNewTitle("");
+                if (typeof setNewBrand === "function") setNewBrand("");
+                if (typeof setNewPlatform === "function") setNewPlatform("TikTok");
+                if (typeof setNewContentType === "function") setNewContentType("");
+                if (typeof setNewBrief === "function") setNewBrief("");
+                if (typeof setNewRawFootageUrl === "function") setNewRawFootageUrl("");
+                if (typeof setNewReferenceUrl === "function") setNewReferenceUrl("");
+                if (typeof setNewDeadline === "function") setNewDeadline("");
+                if (typeof setNewPriority === "function") setNewPriority("Normal");
+                if (typeof setIsNewOrderOpen === "function") setIsNewOrderOpen(true);
+              }} className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold transition cursor-pointer shrink-0">
               <Plus className="w-4 h-4" />Buat Order Video
             </button>
             </div>
           )}
         </div>
 
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="bg-white p-4 rounded-2xl border border-slate-200/80"><div className="text-xs font-medium text-slate-500">Total Order</div><div className="text-2xl font-bold text-slate-900 mt-1">{stats.total}</div></div>
-          <div className="bg-white p-4 rounded-2xl border border-sky-200"><div className="text-xs font-medium text-sky-700">Dalam Antrean</div><div className="text-2xl font-bold text-sky-800 mt-1">{stats.queue}</div></div>
-          <div className="bg-white p-4 rounded-2xl border border-amber-200"><div className="text-xs font-medium text-amber-700">Dikerjakan / Revisi</div><div className="text-2xl font-bold text-amber-800 mt-1">{stats.inProgress}</div></div>
-          <div className="bg-white p-4 rounded-2xl border border-emerald-200"><div className="text-xs font-medium text-emerald-700">Review / Selesai</div><div className="text-2xl font-bold text-emerald-800 mt-1">{stats.reviewDone}</div></div>
-        </div>
+        {(() => {
+          const allOrders = (Array.isArray(orders) ? orders : []).filter((ord) => {
+            if (!ord) return false;
+            const rText = String(
+              (typeof currentUser !== "undefined" && currentUser?.role) ||
+                (typeof activeRole !== "undefined" ? activeRole : "") ||
+                ""
+            )
+              .trim()
+              .toLowerCase();
+            const isBmAccount =
+              rText.includes("brand manager") ||
+              rText.includes("brand management") ||
+              rText === "manager" ||
+              rText === "admin" ||
+              rText === "owner";
+            if (!isBmAccount) {
+              if (rText.includes("editor") && typeof currentUser !== "undefined" && currentUser) {
+                return isOrderVisibleToCurrentEditor(ord, currentUser);
+              }
+              return true;
+            }
+
+            const myUid = String(currentUser?.uid || currentUser?.id || "").trim();
+            const myEmail = String(currentUser?.email || "").trim().toLowerCase();
+            const myName = String(currentUser?.name || "").trim().toLowerCase();
+            const orderUid = String(ord?.requestedByUid || "").trim();
+            const orderEmail = String(ord?.requestedByEmail || "").trim().toLowerCase();
+            const orderReqBy = String(ord?.requestedBy || "").trim().toLowerCase();
+
+            if (orderUid) return Boolean(myUid && orderUid === myUid);
+            if (orderEmail) return Boolean(myEmail && orderEmail === myEmail);
+            if (orderReqBy) return Boolean((myName && orderReqBy === myName) || (myEmail && orderReqBy === myEmail));
+            return false;
+          });
+          const isPostedItem = (ord) => {
+            const stLow = String(ord?.status || "").trim().toLowerCase();
+            return (
+              Boolean(ord?.isPosted) ||
+              Boolean(ord?.postedAt) ||
+              stLow === "sudah diposting" ||
+              stLow === "sudah diupload" ||
+              stLow === "sudah di-upload" ||
+              stLow === "terposting"
+            );
+          };
+
+          const totalOrderCount = allOrders.length;
+          const queueCount = allOrders.filter(
+            (ord) => !isPostedItem(ord) && String(ord?.status || "").trim() === "Antrean"
+          ).length;
+          const workOrRevisionCount = allOrders.filter((ord) => {
+            if (isPostedItem(ord)) return false;
+            const st = String(ord?.status || "").trim();
+            return st === "Sedang Dikerjakan" || st === "Revisi";
+          }).length;
+          const reviewOrReadyCount = allOrders.filter((ord) => {
+            if (isPostedItem(ord)) return false;
+            const st = String(ord?.status || "").trim();
+            return st === "Review" || st === "Selesai";
+          }).length;
+          const alreadyPostedCount = allOrders.filter((ord) => isPostedItem(ord)).length;
+
+          const summaryCardsConfig = [
+            {
+              key: "total",
+              title: "Total Order",
+              count: totalOrderCount,
+              cardClass: "bg-white p-4 rounded-2xl border border-slate-200/80 hover:border-slate-400 transition text-left cursor-pointer",
+              labelClass: "text-xs font-medium text-slate-500",
+              valueClass: "text-2xl font-bold text-slate-900 mt-1",
+            },
+            {
+              key: "queue",
+              title: "Dalam Antrean",
+              count: queueCount,
+              cardClass: "bg-white p-4 rounded-2xl border border-sky-200 hover:border-sky-400 transition text-left cursor-pointer",
+              labelClass: "text-xs font-medium text-sky-700",
+              valueClass: "text-2xl font-bold text-sky-800 mt-1",
+            },
+            {
+              key: "work_revision",
+              title: "Dikerjakan / Revisi",
+              count: workOrRevisionCount,
+              cardClass: "bg-white p-4 rounded-2xl border border-amber-200 hover:border-amber-400 transition text-left cursor-pointer",
+              labelClass: "text-xs font-medium text-amber-700",
+              valueClass: "text-2xl font-bold text-amber-800 mt-1",
+            },
+            {
+              key: "review_ready",
+              title: "Review / Siap Posting",
+              count: reviewOrReadyCount,
+              cardClass: "bg-white p-4 rounded-2xl border border-emerald-200 hover:border-emerald-400 transition text-left cursor-pointer",
+              labelClass: "text-xs font-medium text-emerald-700",
+              valueClass: "text-2xl font-bold text-emerald-800 mt-1",
+            },
+            {
+              key: "posted",
+              title: "Sudah Posting",
+              count: alreadyPostedCount,
+              cardClass: "bg-white p-4 rounded-2xl border border-violet-200 hover:border-violet-400 transition text-left cursor-pointer",
+              labelClass: "text-xs font-medium text-violet-700",
+              valueClass: "text-2xl font-bold text-violet-800 mt-1",
+            },
+          ];
+
+          const parseCardOrderMs = (item) => {
+            const raw = item?.createdAt ?? item?.timestamp ?? item?.updatedAt ?? item?.postedAt ?? null;
+            if (!raw) return null;
+            if (typeof raw === "number") return raw;
+            if (typeof raw?.toMillis === "function") return raw.toMillis();
+            if (typeof raw?.seconds === "number") return raw.seconds * 1000;
+            const dt = Date.parse(raw);
+            return Number.isNaN(dt) ? null : dt;
+          };
+
+          const activeCardCfg = summaryCardsConfig.find((c) => c.key === summaryPopupKey) || null;
+          const popupOrders = (() => {
+            if (!activeCardCfg) return [];
+            const filtered = allOrders
+              .map((order, index) => ({ order, index }))
+              .filter(({ order }) => {
+                if (typeof isOrderOwnedByCurrentAccount === "function" && !isOrderOwnedByCurrentAccount(order)) {
+                  return false;
+                }
+                if (!order) return false;
+                const posted = isPostedItem(order);
+                const st = String(order?.status || "").trim();
+                if (activeCardCfg.key === "total") return true;
+                if (activeCardCfg.key === "queue") return !posted && st === "Antrean";
+                if (activeCardCfg.key === "work_revision")
+                  return !posted && (st === "Sedang Dikerjakan" || st === "Revisi");
+                if (activeCardCfg.key === "review_ready")
+                  return !posted && (st === "Review" || st === "Selesai");
+                if (activeCardCfg.key === "posted") return posted;
+                return false;
+              })
+              .sort((a, b) => {
+                const msA = parseCardOrderMs(a.order);
+                const msB = parseCardOrderMs(b.order);
+                if (msA !== null && msB !== null && msA !== msB) return msA - msB;
+                if (msA !== null && msB === null) return -1;
+                if (msA === null && msB !== null) return 1;
+                return a.index - b.index;
+              })
+              .map(({ order }) => order);
+
+            if (activeCardCfg.key === "review_ready") {
+              const rev = filtered.filter((o) => String(o?.status || "").trim() === "Review");
+              const ready = filtered.filter((o) => String(o?.status || "").trim() === "Selesai");
+              return [...rev, ...ready];
+            }
+            return filtered;
+          })();
+
+          return (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+                {summaryCardsConfig.map((card) => (
+                  <button
+                    key={card.key}
+                    type="button"
+                    onClick={() => setSummaryPopupKey(card.key)}
+                    className={card.cardClass}
+                  >
+                    <div className={card.labelClass}>{card.title}</div>
+                    <div className={card.valueClass}>{card.count}</div>
+                  </button>
+                ))}
+              </div>
+
+              {activeCardCfg && (
+                <div
+                  onClick={() => setSummaryPopupKey(null)}
+                  className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-[1px] flex items-center justify-center p-4"
+                >
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    className="bg-white rounded-2xl border border-slate-200 shadow-xl w-full max-w-2xl max-h-[82vh] flex flex-col overflow-hidden"
+                  >
+                    <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+                      <div className="flex items-baseline gap-2.5">
+                        <h3 className="text-base font-bold text-slate-900">{activeCardCfg.title}</h3>
+                        <span className="text-xs font-medium text-slate-500">
+                          {popupOrders.length} konten
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSummaryPopupKey(null)}
+                        className="px-3 py-1 rounded-lg border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+                      >
+                        Tutup
+                      </button>
+                    </div>
+
+                    <div className="p-5 overflow-y-auto space-y-2.5">
+                      {popupOrders.length === 0 ? (
+                        <div className="rounded-xl border border-dashed border-slate-300 p-8 text-center text-xs text-slate-500">
+                          Belum ada konten untuk kategori {activeCardCfg.title}.
+                        </div>
+                      ) : (
+                        popupOrders.map((ord) => {
+                          const isPostedItemDone = isPostedItem(ord);
+                          const isReadyItem = !isPostedItemDone && String(ord?.status || "").trim() === "Selesai";
+                          const badgeText = isPostedItemDone
+                            ? "Terposting"
+                            : isReadyItem
+                            ? "Siap Posting"
+                            : ord?.status || "Antrean";
+
+                          return (
+                            <div
+                              key={ord.docId || ord.id}
+                              onClick={() => {
+                                if (typeof setShowEditorSubmitTab === "function") setShowEditorSubmitTab(false);
+                                if (typeof setShowRevisionInput === "function") setShowRevisionInput(false);
+                                if (typeof setSelectedOrderId === "function") setSelectedOrderId(ord.docId || ord.id);
+                                setSummaryPopupKey(null);
+                              }}
+                              className="p-3.5 rounded-xl border border-slate-200 hover:border-sky-300 hover:bg-sky-50/40 transition flex items-center justify-between gap-3 cursor-pointer"
+                            >
+                              <div className="min-w-0 space-y-1">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-[11px] font-bold text-sky-700 bg-sky-50 px-2 py-0.5 rounded-md">
+                                    {ord.id || "ORDER"}
+                                  </span>
+                                  <span className="text-[11px] font-semibold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-full">
+                                    {badgeText}
+                                  </span>
+                                </div>
+                                <div className="text-sm font-bold text-slate-900 truncate">
+                                  {ord.title || "Untitled Order"}
+                                </div>
+                                <div className="text-xs text-slate-500 truncate">
+                                  {ord.accountName || ord.brand || "-"} • {ord.platform || "TikTok"}
+                                </div>
+                              </div>
+                              <span className="text-xs font-semibold text-sky-700 shrink-0">Detail →</span>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
+          );
+        })()}
 
 
           {/* Grid Card Akun TikTok (Real-Time dari Firestore) */}
           <section className="space-y-3">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-baseline gap-2.5">
                 <h2 className="text-base font-bold text-slate-900">Akun TikTok</h2>
                 <span className="text-xs font-medium text-slate-500">
                   {(tiktokAccounts?.length ?? 0)} akun
                 </span>
               </div>
-              <span className="text-[11px] text-slate-400">
-                Sinkron real-time • Klik "Buka akun" untuk kelola jenis konten & monitoring order
-              </span>
+              <div className="flex items-center gap-3">
+                <span className="hidden sm:inline text-[11px] text-slate-400">
+                  Sinkron real-time • Klik "Buka akun" untuk kelola jenis konten & monitoring order
+                </span>
+              </div>
             </div>
 
             {(tiktokAccounts?.length ?? 0) === 0 ? (
@@ -1187,16 +2697,23 @@ const [newContentType, setNewContentType] = useState("");
                       className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs hover:border-slate-300 transition flex flex-col justify-between gap-4"
                     >
                       <div className="space-y-3">
-                        <div className="flex items-start gap-3">
-                          <div className="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center font-bold text-sm shrink-0">
-                            ♪
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="font-bold text-sm text-slate-900 truncate">
-                              {account.accountName || account.brandName}
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-3 min-w-0 flex-1">
+                            <div className="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center font-bold text-sm shrink-0 overflow-hidden">
+                              {(account?.logoUrl || account?.brandLogo) ? (
+                                <img
+                                  src={account.logoUrl || account.brandLogo}
+                                  alt={account?.accountName || account?.brandName || "Logo Akun"}
+                                  className="w-full h-full object-cover"
+                                />
+                              ) : (
+                                "♪"
+                              )}
                             </div>
-                            <div className="text-xs text-slate-500 truncate">
-                              {account.accountName || "-"}
+                            <div className="min-w-0 flex-1">
+                              <div className="font-bold text-sm text-slate-900 truncate">
+                                {account.accountName || account.brandName}
+                              </div>
                             </div>
                           </div>
                         </div>
@@ -1254,7 +2771,408 @@ const [newContentType, setNewContentType] = useState("");
             )}
           </section>
 
-        
+          {/* Grid Daftar Order Video Utama */}
+          {(() => {
+            const parseOrderMs = (item) => {
+              const raw = item?.createdAt ?? item?.timestamp ?? item?.updatedAt ?? item?.postedAt ?? null;
+              if (!raw) return null;
+              if (typeof raw === "number") return raw;
+              if (typeof raw?.toMillis === "function") return raw.toMillis();
+              if (typeof raw?.seconds === "number") return raw.seconds * 1000;
+              const dt = Date.parse(raw);
+              return Number.isNaN(dt) ? null : dt;
+            };
+
+            const baseSource = (Array.isArray(orders) ? orders : []).filter((ord) => {
+              if (!ord) return false;
+              const rText = String(
+                (typeof currentUser !== "undefined" && currentUser?.role) ||
+                  (typeof activeRole !== "undefined" ? activeRole : "") ||
+                  ""
+              )
+                .trim()
+                .toLowerCase();
+              const isBmAccount =
+                rText.includes("brand manager") ||
+                rText.includes("brand management") ||
+                rText === "manager" ||
+                rText === "admin" ||
+                rText === "owner";
+              if (!isBmAccount) {
+                if (rText.includes("editor") && typeof currentUser !== "undefined" && currentUser) {
+                  return isOrderVisibleToCurrentEditor(ord, currentUser);
+                }
+                return true;
+              }
+
+              const myUid = String(currentUser?.uid || currentUser?.id || "").trim();
+              const myEmail = String(currentUser?.email || "").trim().toLowerCase();
+              const myName = String(currentUser?.name || "").trim().toLowerCase();
+              const orderUid = String(ord?.requestedByUid || "").trim();
+              const orderEmail = String(ord?.requestedByEmail || "").trim().toLowerCase();
+              const orderReqBy = String(ord?.requestedBy || "").trim().toLowerCase();
+
+              if (orderUid) return Boolean(myUid && orderUid === myUid);
+              if (orderEmail) return Boolean(myEmail && orderEmail === myEmail);
+              if (orderReqBy) return Boolean((myName && orderReqBy === myName) || (myEmail && orderReqBy === myEmail));
+              return false;
+            });
+            const compareOldestFirst = (a, b) => {
+              const msA = parseOrderMs(a.order);
+              const msB = parseOrderMs(b.order);
+              if (msA !== null && msB !== null && msA !== msB) return msA - msB;
+              if (msA !== null && msB === null) return -1;
+              if (msA === null && msB !== null) return 1;
+              return a.index - b.index;
+            };
+
+            const isPostedOrder = (ord) => {
+              const stLow = String(ord?.status || "").trim().toLowerCase();
+              return (
+                Boolean(ord?.isPosted) ||
+                Boolean(ord?.postedAt) ||
+                stLow === "sudah diposting" ||
+                stLow === "sudah diupload" ||
+                stLow === "sudah di-upload" ||
+                stLow === "terposting"
+              );
+            };
+
+            const activeRoleText = String(
+              (typeof currentUser !== "undefined" && currentUser?.role) ||
+                (typeof activeRole !== "undefined" ? activeRole : "") ||
+                ""
+            )
+              .trim()
+              .toLowerCase();
+            const isVideoEditorRole = activeRoleText.includes("editor");
+
+            const displayedBrandOrders = (() => {
+              const isHistoryActive = typeof showContentHistory !== "undefined" && showContentHistory;
+
+              if (isVideoEditorRole) {
+                if (isHistoryActive) {
+                  const readyInHistory = baseSource
+                    .map((order, index) => ({ order, index }))
+                    .filter(({ order }) => {
+                      if (!order || isPostedOrder(order)) return false;
+                      return String(order.status || "").trim() === "Selesai";
+                    })
+                    .sort(compareOldestFirst)
+                    .map(({ order }) => order);
+
+                  const postedInHistory = baseSource
+                    .map((order, index) => ({ order, index }))
+                    .filter(({ order }) => order && isPostedOrder(order))
+                    .sort(compareOldestFirst)
+                    .map(({ order }) => order);
+
+                  return [...readyInHistory, ...postedInHistory];
+                }
+
+                const queueList = baseSource
+                  .map((order, index) => ({ order, index }))
+                  .filter(
+                    ({ order }) =>
+                      order &&
+                      !isPostedOrder(order) &&
+                      String(order.status || "").trim() === "Antrean"
+                  )
+                  .sort(compareOldestFirst)
+                  .map(({ order }) => order);
+
+                const workingList = baseSource
+                  .map((order, index) => ({ order, index }))
+                  .filter(
+                    ({ order }) =>
+                      order &&
+                      !isPostedOrder(order) &&
+                      String(order.status || "").trim() === "Sedang Dikerjakan"
+                  )
+                  .sort(compareOldestFirst)
+                  .map(({ order }) => order);
+
+                const revisionList = baseSource
+                  .map((order, index) => ({ order, index }))
+                  .filter(
+                    ({ order }) =>
+                      order &&
+                      !isPostedOrder(order) &&
+                      String(order.status || "").trim() === "Revisi"
+                  )
+                  .sort(compareOldestFirst)
+                  .map(({ order }) => order);
+
+                return [...queueList, ...workingList, ...revisionList];
+              }
+
+              if (isHistoryActive) {
+                return baseSource
+                  .map((order, index) => ({ order, index }))
+                  .filter(({ order }) => order && isPostedOrder(order))
+                  .sort(compareOldestFirst)
+                  .map(({ order }) => order);
+              }
+
+              const reviewList = baseSource
+                .map((order, index) => ({ order, index }))
+                .filter(
+                  ({ order }) =>
+                    order &&
+                    !isPostedOrder(order) &&
+                    String(order.status || "").trim() === "Review"
+                )
+                .sort(compareOldestFirst)
+                .map(({ order }) => order);
+
+              const readyToPostList = baseSource
+                .map((order, index) => ({ order, index }))
+                .filter(
+                  ({ order }) =>
+                    order &&
+                    !isPostedOrder(order) &&
+                    String(order.status || "").trim() === "Selesai"
+                )
+                .sort(compareOldestFirst)
+                .map(({ order }) => order);
+
+              return [...reviewList, ...readyToPostList];
+            })();
+
+            return (
+          <>
+<section className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-4 sm:p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="text-sm sm:text-base font-bold text-slate-900">
+                    Produktivitas Tim
+                  </h2>
+                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-sky-50 text-sky-700 border border-sky-200/70">
+                    {productivityData.isAdminOrOwner ? "Seluruh Tim" : "Akun Anda"}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {productivityData.isAdminOrOwner
+                    ? "Pantau output, proses revisi, dan tingkat penyelesaian per Brand Manager & Video Editor."
+                    : "Ringkasan output dan progres order konten video"}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowProductivityPanel((prev) => !prev)}
+                className={
+                  "px-3.5 py-1.5 rounded-xl text-xs font-semibold border transition cursor-pointer shrink-0 self-start sm:self-auto " +
+                  (showProductivityPanel
+                    ? "bg-sky-600 text-white border-sky-600"
+                    : "bg-slate-50 text-slate-700 border-slate-200 hover:border-sky-300 hover:text-sky-700")
+                }
+              >
+                {showProductivityPanel ? "Tutup Rekap" : "Lihat Produktivitas"}
+              </button>
+            </div>
+
+            {showProductivityPanel && (
+              <div className="space-y-4 pt-1 border-t border-slate-100">
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2.5 pt-2">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {[
+                      { id: "today", label: "Hari Ini" },
+                      { id: "7d", label: "7 Hari" },
+                      { id: "30d", label: "30 Hari" },
+                      { id: "all", label: "Semua" },
+                    ].map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => setProductivityRange(p.id)}
+                        className={
+                          "px-2.5 py-1 rounded-lg text-xs font-semibold border transition cursor-pointer " +
+                          (productivityRange === p.id
+                            ? "bg-slate-900 text-white border-slate-900"
+                            : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50")
+                        }
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {productivityData.isAdminOrOwner && (
+                      <select
+                        value={productivityRoleFilter}
+                        onChange={(e) => setProductivityRoleFilter(e.target.value)}
+                        className="px-2.5 py-1.5 rounded-xl border border-slate-200 text-xs font-medium text-slate-700 bg-white"
+                      >
+                        <option value="Semua">Semua Role</option>
+                        <option value="Video Editor">Video Editor</option>
+                        <option value="Brand Management">Brand Management</option>
+                      </select>
+                    )}
+                    <input
+                      type="text"
+                      value={productivitySearch}
+                      onChange={(e) => setProductivitySearch(e.target.value)}
+                      placeholder="Cari nama user..."
+                      className="px-3 py-1.5 rounded-xl border border-slate-200 text-xs text-slate-700 bg-white w-full sm:w-44"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                  <div className="rounded-xl bg-slate-50 border border-slate-200/70 p-3">
+                    <div className="text-[11px] font-medium text-slate-500">Total Order</div>
+                    <div className="text-lg font-bold text-slate-900 mt-0.5">{productivityData.summary.total}</div>
+                  </div>
+                  <div className="rounded-xl bg-emerald-50/70 border border-emerald-200/70 p-3">
+                    <div className="text-[11px] font-medium text-emerald-700">Selesai</div>
+                    <div className="text-lg font-bold text-emerald-800 mt-0.5">{productivityData.summary.completed}</div>
+                  </div>
+                  <div className="rounded-xl bg-indigo-50/70 border border-indigo-200/70 p-3">
+                    <div className="text-[11px] font-medium text-indigo-700">Menunggu Review</div>
+                    <div className="text-lg font-bold text-indigo-800 mt-0.5">{productivityData.summary.review}</div>
+                  </div>
+                  <div className="rounded-xl bg-amber-50/70 border border-amber-200/70 p-3">
+                    <div className="text-[11px] font-medium text-amber-800">Rasio Selesai</div>
+                    <div className="text-lg font-bold text-amber-900 mt-0.5">{productivityData.completionRate}%</div>
+                  </div>
+                </div>
+
+                {productivityData.rows.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-slate-200 p-5 text-center text-xs text-slate-500">
+                    Belum ada data produktivitas pada periode atau filter yang dipilih.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {productivityData.rows.map((row) => (
+                      <div
+                        key={`${row.role}-${row.key}`}
+                        className="rounded-2xl border border-slate-200/80 bg-slate-50/50 p-3.5 space-y-2.5"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="text-sm font-bold text-slate-900 truncate">{row.name}</div>
+                            <span className="inline-block mt-0.5 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-white border border-slate-200 text-slate-600">
+                              {row.role}
+                            </span>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <div className="text-xs font-bold text-emerald-700">{row.completionRate}% Selesai</div>
+                            <div className="text-[11px] text-slate-500">{row.completed}/{row.total} order</div>
+                          </div>
+                        </div>
+
+                        <div className="w-full h-2 rounded-full bg-slate-200/80 overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-emerald-500 transition-all"
+                            style={{ width: `${Math.min(100, Math.max(0, row.completionRate))}%` }}
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2 text-[11px] text-slate-600 pt-0.5 flex-wrap">
+                          <span>Antrean/Proses: <b>{row.queue + row.inProgress}</b></span>
+                          <span>Review: <b>{row.review}</b></span>
+                          <span>Revisi: <b className="text-rose-600">{row.revision}</b></span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+
+          <section className="space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-baseline gap-2.5 min-w-0">
+                <h2 className="text-base font-bold text-slate-900 truncate">
+                  {showContentHistory ? "Riwayat Konten" : "Daftar Order Video"}
+                </h2>
+                <span className="text-xs font-medium text-slate-500 shrink-0">
+                  {(displayedBrandOrders?.length ?? 0)} order
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowContentHistory((prev) => !prev)}
+                className={
+                  "px-3.5 py-1.5 rounded-xl text-xs font-semibold border transition cursor-pointer shrink-0 " +
+                  (showContentHistory
+                    ? "bg-slate-900 text-white border-slate-900"
+                    : "bg-white text-slate-700 border-slate-200 hover:border-sky-300 hover:text-sky-700")
+                }
+              >
+                Riwayat Konten
+              </button>
+            </div>
+
+            {(displayedBrandOrders?.length ?? 0) === 0 ? (
+              <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-8 text-center space-y-1.5">
+                <p className="text-sm font-semibold text-slate-700">Belum ada order video yang tampil</p>
+                <p className="text-xs text-slate-500">
+                  Klik tombol "+ Buat Order Video" untuk membuat order baru atau ubah filter pencarian.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {displayedBrandOrders.map((ord) => {
+                  const isReadyToPost = ord.status === "Selesai" && !ord.isPosted;
+                  const isPostedDone = ord.status === "Selesai" && Boolean(ord.isPosted);
+                  const baseStCfg = STATUS_CONFIG[ord.status] || {
+                    label: ord.status || "Antrean",
+                    badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
+                    dotClass: "bg-slate-500",
+                  };
+                  const stCfg = isReadyToPost
+                    ? {
+                        label: "Siap Posting",
+                        badgeClass: "bg-emerald-50 text-emerald-700 border-emerald-200",
+                        dotClass: "bg-emerald-500",
+                      }
+                    : isPostedDone
+                    ? {
+                        label: "Terposting",
+                        badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
+                        dotClass: "bg-slate-500",
+                      }
+                    : baseStCfg;
+                  return (
+                    <div
+                      key={ord.docId || ord.id}
+                      onClick={() => {
+                        if (typeof setShowEditorSubmitTab === "function") setShowEditorSubmitTab(false);
+                        if (typeof setShowRevisionInput === "function") setShowRevisionInput(false);
+                        if (typeof setSelectedOrderId === "function") setSelectedOrderId(ord.docId || ord.id);
+                      }}
+                      className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs hover:border-sky-300 transition flex flex-col justify-between gap-3 cursor-pointer"
+                    >
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[11px] font-bold text-sky-700 bg-sky-50 px-2 py-0.5 rounded-md">
+                            {ord.id || "ORDER"}
+                          </span>
+                          <span className={"inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-0.5 rounded-full border " + stCfg.badgeClass}>
+                            <span className={"w-1.5 h-1.5 rounded-full " + stCfg.dotClass} />
+                            {stCfg.label}
+                          </span>
+                        </div>
+                        <h3 className="text-sm font-bold text-slate-900 line-clamp-2">{ord.title || "Untitled Order"}</h3>
+                        <p className="text-xs text-slate-500 truncate">{ord.brand || "-"} • {ord.platform || "TikTok"}</p>
+                      </div>
+                      <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
+                        <span>{ord.contentType || ord.type || "Konten"}</span>
+                        <span className="font-semibold text-sky-700">Detail →</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+          </>);
+          })()}
       </main>
 
       {isNewOrderOpen && (
@@ -1264,7 +3182,7 @@ const [newContentType, setNewContentType] = useState("");
               <h3 className="font-bold text-base text-slate-900">Buat Order Video Vertikal (9:16)</h3>
               <button type="button" onClick={() => setIsNewOrderOpen(false)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"><X className="w-4 h-4" /></button>
             </div>
-            <form onSubmit={handleCreateOrder} className="space-y-3.5">
+            <form onSubmit={(e) => { if (typeof handleCreateOrder === "function") return handleCreateOrder(e); e.preventDefault(); }} className="space-y-3.5">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="relative">
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Akun Tiktok</label>
@@ -1335,7 +3253,7 @@ const [newContentType, setNewContentType] = useState("");
                               onMouseDown={(e) => {
                                 e.preventDefault();
                                 setNewBrand(acc.accountName);
-                                setNewContentType(cleanTypes[0] || "");
+                                setNewContentType(Array.isArray(cleanTypes) && cleanTypes.length > 0 ? cleanTypes[0] : "");
                                 setIsTiktokDropdownOpen(false);
                               }}
                               className="w-full text-left px-3.5 py-2 hover:bg-sky-50/80 transition flex flex-col cursor-pointer border-b border-slate-50 last:border-b-0"
@@ -1366,18 +3284,38 @@ const [newContentType, setNewContentType] = useState("");
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Jenis konten</label>
                   <select
-                    required
-                    value={availableContentTypes.includes(newContentType) ? newContentType : (availableContentTypes[0] || "")}
+                    value={orderModalContentTypes.includes(newContentType) ? newContentType : ""}
                     onChange={(e) => setNewContentType(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/15 transition text-sm bg-white text-slate-800"
+                    disabled={orderModalContentTypes.length === 0}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/15 transition text-sm bg-white text-slate-800 disabled:bg-slate-50 disabled:text-slate-400"
                   >
-                    {availableContentTypes.map((ct) => (
-                      <option key={ct} value={ct}>
+                    <option value="">{orderModalContentTypes.length === 0 ? "Pilih akun TikTok dulu" : "Pilih jenis konten"}</option>
+                    {orderModalContentTypes.map((ct, idx) => (
+                      <option key={String(ct) + "_" + idx} value={ct}>
                         {ct}
                       </option>
                     ))}
                   </select>
                 </div>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Jumlah Konten / Batch (1 - 20)</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={batchCount}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    if (Number.isNaN(val)) {
+                      setBatchCount(1);
+                    } else {
+                      setBatchCount(Math.min(20, Math.max(1, val)));
+                    }
+                  }}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm"
+                />
+                <p className="text-[11px] text-slate-500 mt-1">Maksimal 20 video dalam 1 kali kirim. Setiap video akan dibuatkan item order terpisah agar Video Editor bisa submit hasilnya per video.</p>
               </div>
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">Judul Konten</label>
@@ -1412,7 +3350,7 @@ const [newContentType, setNewContentType] = useState("");
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Video Editor</label>
                   <select value={newAssignedEditor} onChange={(e) => setNewAssignedEditor(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white">
-                    {(Array.isArray(editors) ? editors.length : 0) === 0 ? <option value="">Semua Editor</option> : editors.map((ed) => <option key={ed.id} value={ed.name}>{ed.name}</option>)}
+                    <><option value="">Semua Editor</option>{Array.from(new Map((Array.isArray(editors) ? editors : []).filter((ed) => ed && (ed.name || ed.fullName || ed.email)).map((ed) => { const label = String(ed.name || ed.fullName || ed.email).trim(); return [label.toLowerCase(), { key: ed.id || ed.docId || label, value: label, label }]; })).values()).map((opt) => <option key={opt.key} value={opt.value}>{opt.label}</option>)}</>
                   </select>
                 </div>
               </div>
@@ -1485,7 +3423,7 @@ const [newContentType, setNewContentType] = useState("");
                 </div>
 
                 {/* PANEL AKSI BERDASARKAN ROLE */}
-                {currentUser.role === "Video Editor" ? (
+                {(currentUser?.role === "Video Editor" || Boolean(isEditor)) ? (
                   <div className="p-4 rounded-2xl bg-sky-50/70 border border-sky-200/80 space-y-3">
                     <div className="text-xs font-bold text-slate-800">Kontrol Pengerjaan Editor</div>
 
@@ -1555,7 +3493,7 @@ const [newContentType, setNewContentType] = useState("");
 
                     {selectedOrder.status === "Review" && (
                       <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 text-xs text-indigo-800 font-medium">
-                        Video sudah dikirim dan berstatus <span className="font-bold">Review</span>. Menunggu keputusan Brand Manager atau Social Media Specialist (Revisi / Selesai).
+                        Video sudah dikirim dan berstatus <span className="font-bold">Review</span>. Menunggu keputusan Brand Manager atau Brand Manager (Revisi / Selesai).
                       </div>
                     )}
 
@@ -1566,7 +3504,7 @@ const [newContentType, setNewContentType] = useState("");
                     )}
                   </div>
                 ) : (
-                  /* PANEL UNTUK BRAND MANAGER & SOCIAL MEDIA SPECIALIST */
+                  /* PANEL UNTUK BRAND MANAGER & Brand Manager */
                   <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-bold text-slate-800">Keputusan Review Order</span>
@@ -1582,8 +3520,11 @@ const [newContentType, setNewContentType] = useState("");
                     <div className="grid grid-cols-2 gap-2.5">
                       <button
                         type="button"
-                        disabled={selectedOrder.status !== "Review"}
-                        onClick={() => setShowRevisionInput(true)}
+                        disabled={selectedOrder.status === "Selesai" && Boolean(selectedOrder.isPosted)}
+                        onClick={() => {
+                          if (typeof setShowEditorSubmitTab === "function") setShowEditorSubmitTab(false);
+                          setShowRevisionInput((prev) => !prev);
+                        }}
                         className="inline-flex items-center justify-center gap-1.5 py-2.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-semibold text-xs transition cursor-pointer"
                       >
                         <RotateCcw className="w-3.5 h-3.5" />
@@ -1644,7 +3585,69 @@ const [newContentType, setNewContentType] = useState("");
                     )}
 
                     {showRevisionInput && selectedOrder.status === "Review" && (
-                      <form onSubmit={handleRequestRevision} className="p-3 rounded-xl bg-white border border-rose-200 space-y-2.5">
+                      <form onSubmit={async (e) => {
+                        if (e && typeof e.preventDefault === "function") e.preventDefault();
+                        const currentOrderSnapshot = selectedOrder;
+                        const cleanNote = String(revisionNote || "").trim() || currentOrderSnapshot?.brief || "-";
+                        try {
+                          if (typeof handleRequestRevision === "function") {
+                            await handleRequestRevision(e);
+                          }
+                          if (currentOrderSnapshot?.docId && typeof updateDoc === "function" && typeof doc === "function" && typeof db !== "undefined" && db) {
+                            await updateDoc(doc(db, "orders", currentOrderSnapshot.docId), {
+                              status: "Revisi",
+                              revisionNote: cleanNote,
+                              updatedAt: typeof serverTimestamp === "function" ? serverTimestamp() : new Date().toISOString(),
+                            });
+                          }
+                          if (currentOrderSnapshot && typeof pushWaNotification === "function") {
+                            const editorTarget = currentOrderSnapshot.assignedEditor || "Video Editor";
+                            const bmTarget = currentOrderSnapshot.creatorName || currentUser?.name || "Brand Management";
+                            const buildFourLines = (recipientName, statusLabel, closing) => {
+                              const orderCode = currentOrderSnapshot?.id ? `${currentOrderSnapshot.id} - ` : "";
+                              const orderTitle = currentOrderSnapshot?.title || "Untitled Order";
+                              const accountLabel =
+                                currentOrderSnapshot?.accountName || currentOrderSnapshot?.brand
+                                  ? ` (${currentOrderSnapshot?.accountName || currentOrderSnapshot?.brand})`
+                                  : "";
+                              return [
+                                `Hai ${recipientName || "Tim"},`,
+                                `Orderan dengan nama: ${orderCode}${orderTitle}${accountLabel}`,
+                                `Catatan order: ${cleanNote}`,
+                                `Status orderan: ${statusLabel}`,
+                                "",
+                                closing,
+                              ].join("\n");
+                            };
+
+                            await pushWaNotification({
+                              event: "Revisi",
+                              targetName: editorTarget,
+                              phone: typeof resolveTeamWhatsApp === "function" ? resolveTeamWhatsApp(editorTarget) : (currentUser?.whatsapp || ""),
+                              message: buildFourLines(
+                                editorTarget,
+                                "Revisi",
+                                "Ada catatan revisi nih, silakan dicek dan disesuaikan ya biar bisa segera lanjut ke tahap berikutnya."
+                              ),
+                            });
+
+                            await pushWaNotification({
+                              event: "Orderan Sudah Direvisi / Review",
+                              targetName: bmTarget,
+                              phone: typeof resolveTeamWhatsApp === "function" ? resolveTeamWhatsApp(bmTarget) : (currentUser?.whatsapp || ""),
+                              message: buildFourLines(
+                                bmTarget,
+                                "Direvisi / Review",
+                                "Perbaikan revisinya sudah selesai dikerjakan dan siap untuk di-review ulang ya. Silakan dicek kembali!"
+                              ),
+                            });
+                          }
+                          if (typeof setShowRevisionInput === "function") setShowRevisionInput(false);
+                          if (typeof setRevisionNote === "function") setRevisionNote("");
+                        } catch (err) {
+                          console.error("Gagal mengirim revisi order:", err);
+                        }
+                      }} className="p-3 rounded-xl bg-white border border-rose-200 space-y-2.5">
                         <label className="block text-[11px] font-bold text-rose-800">Catatan Revisi untuk Editor (Opsional)</label>
                         <textarea
                           rows={2}
@@ -1705,8 +3708,8 @@ const [newContentType, setNewContentType] = useState("");
         </div>
       )}
       {activeTiktokAccount && (() => {
-        const linkedOrders = (Array.isArray(orders) ? orders : []).filter((ord) =>
-          isOrderMatchedToTiktokAccount(ord, activeTiktokAccount)
+        const linkedOrders = (Array.isArray(orders) ? orders : []).filter(
+          (ord) => isOrderOwnedByCurrentAccount(ord) && isOrderMatchedToTiktokAccount(ord, activeTiktokAccount)
         );
         const readyToPostList = linkedOrders.filter(
           (ord) => ord.status === "Selesai" && !ord.isPosted
@@ -1730,10 +3733,14 @@ const [newContentType, setNewContentType] = useState("");
           return matchesQuery && matchesStatus && matchesPlatform;
         });
 
-        const allAvailableTypes = sanitizeContentTypes([
-          ...TIKTOK_CONTENT_TYPES,
-          ...(Array.isArray(editTtSelectedTypes) ? editTtSelectedTypes : []),
-        ]);
+        const allAvailableTypes = Array.from(
+          new Map(
+            sanitizeContentTypes([
+              ...TIKTOK_CONTENT_TYPES,
+              ...(Array.isArray(editTtSelectedTypes) ? editTtSelectedTypes : []),
+            ]).map((t) => [String(t || "").trim().toLowerCase(), String(t || "").trim()])
+          ).values()
+        ).filter(Boolean);
 
         return (
           <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
@@ -1759,13 +3766,16 @@ const [newContentType, setNewContentType] = useState("");
                   </div>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => setActiveTiktokAccountId(null)}
+                
+                <div className="relative z-20 flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTiktokAccountId(null)}
                   className="p-2 rounded-xl hover:bg-slate-200/70 text-slate-600 cursor-pointer shrink-0"
                 >
                   <X className="w-4 h-4" />
                 </button>
+                </div>
               </div>
 
               {/* Tab & Aksi Hapus (Khusus Brand Manager) */}
@@ -1909,8 +3919,8 @@ const [newContentType, setNewContentType] = useState("");
                               key={ord.docId || ord.id}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setActiveTiktokAccountId(null);
-                                openOrderDetail(ord);
+                                if (typeof setActiveTiktokAccountId === "function") setActiveTiktokAccountId(null);
+                                if (typeof setSelectedOrderId === "function") setSelectedOrderId(ord.docId || ord.id);
                               }}
                               className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-sky-400 transition flex flex-col justify-between gap-4 cursor-pointer"
                             >
@@ -2273,5 +4283,13 @@ const [newContentType, setNewContentType] = useState("");
       )}
     </>
 
+  );
+}
+
+export default function App() {
+  return (
+    <AppErrorBoundary>
+      <CreativeFlowApp />
+    </AppErrorBoundary>
   );
 }
