@@ -808,6 +808,8 @@ const [newContentType, setNewContentType] = useState("");
     }
   };
 
+  const isBrandManager = currentUser?.role === "Brand Manager";
+
   const handleApproveComplete = async () => {
     if (!selectedOrder) return;
     await updateDoc(doc(db, "orders", selectedOrder.docId), {
@@ -1052,6 +1054,15 @@ const [newContentType, setNewContentType] = useState("");
             </button>
             </div>
           )}
+        </div>
+
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="bg-white p-4 rounded-2xl border border-slate-200/80"><div className="text-xs font-medium text-slate-500">Total Order</div><div className="text-2xl font-bold text-slate-900 mt-1">{stats.total}</div></div>
+          <div className="bg-white p-4 rounded-2xl border border-sky-200"><div className="text-xs font-medium text-sky-700">Dalam Antrean</div><div className="text-2xl font-bold text-sky-800 mt-1">{stats.queue}</div></div>
+          <div className="bg-white p-4 rounded-2xl border border-amber-200"><div className="text-xs font-medium text-amber-700">Dikerjakan / Revisi</div><div className="text-2xl font-bold text-amber-800 mt-1">{stats.inProgress}</div></div>
+          <div className="bg-white p-4 rounded-2xl border border-emerald-200"><div className="text-xs font-medium text-emerald-700">Review / Selesai</div><div className="text-2xl font-bold text-emerald-800 mt-1">{stats.reviewDone}</div></div>
+        </div>
+
 
           {/* Grid Card Akun TikTok (Real-Time dari Firestore) */}
           <section className="space-y-3">
@@ -1159,14 +1170,6 @@ const [newContentType, setNewContentType] = useState("");
               </div>
             )}
           </section>
-        </div>
-
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="bg-white p-4 rounded-2xl border border-slate-200/80"><div className="text-xs font-medium text-slate-500">Total Order</div><div className="text-2xl font-bold text-slate-900 mt-1">{stats.total}</div></div>
-          <div className="bg-white p-4 rounded-2xl border border-sky-200"><div className="text-xs font-medium text-sky-700">Dalam Antrean</div><div className="text-2xl font-bold text-sky-800 mt-1">{stats.queue}</div></div>
-          <div className="bg-white p-4 rounded-2xl border border-amber-200"><div className="text-xs font-medium text-amber-700">Dikerjakan / Revisi</div><div className="text-2xl font-bold text-amber-800 mt-1">{stats.inProgress}</div></div>
-          <div className="bg-white p-4 rounded-2xl border border-emerald-200"><div className="text-xs font-medium text-emerald-700">Review / Selesai</div><div className="text-2xl font-bold text-emerald-800 mt-1">{stats.reviewDone}</div></div>
-        </div>
 
         <div className="bg-white p-4 rounded-2xl border border-slate-200/80 flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
           <div className="relative flex-1">
