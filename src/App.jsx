@@ -848,6 +848,7 @@ const [newContentType, setNewContentType] = useState("Soft Selling / UGC");
             <p className="text-xs text-slate-500 mt-0.5">Tersinkronisasi langsung dengan Firestore • Anggota tim terdaftar: {teamUsers.length} orang.</p>
           </div>
           {currentUser.role !== "Video Editor" && (
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
             <button
                 type="button"
                 onClick={() => setIsAddTiktokModalOpen(true)}
@@ -855,9 +856,10 @@ const [newContentType, setNewContentType] = useState("Soft Selling / UGC");
               >
                 + Tambah Akun TikTok
               </button>
-            <button type="button" onClick={() => setIsNewOrderOpen(true)} className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold transition cursor-pointer shrink-0">
+              <button type="button" onClick={() => setIsNewOrderOpen(true)} className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold transition cursor-pointer shrink-0">
               <Plus className="w-4 h-4" />Buat Order Video
             </button>
+            </div>
           )}
         </div>
 
@@ -933,12 +935,29 @@ const [newContentType, setNewContentType] = useState("Soft Selling / UGC");
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Akun Tiktok</label>
-                  <input list="daftar-akun-tiktok" type="text" required value={newBrand} onChange={(e) =>
+                  <input
+                    list="daftar-akun-tiktok"
+                    type="text"
+                    required
+                    value={newBrand}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setNewBrand(val);
+                      const found = tiktokAccounts.find(
+                        (acc) => acc.accountName.toLowerCase() === val.trim().toLowerCase()
+                      );
+                      if (found && found.contentTypes?.length > 0 && !found.contentTypes.includes(newContentType)) {
+                        setNewContentType(found.contentTypes[0]);
+                      }
+                    }}
+                    placeholder="Contoh: @primagold.id"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm"
+                  />
                   <datalist id="daftar-akun-tiktok">
                     {tiktokAccounts.map((acc) => (
                       <option key={acc.id} value={acc.accountName}>{acc.accountName} ({acc.brandName})</option>
                     ))}
-                  </datalist> setNewBrand(e.target.value)} placeholder="Contoh: @primagold.id" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+                  </datalist>
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Platform</label>
@@ -1232,8 +1251,6 @@ const [newContentType, setNewContentType] = useState("Soft Selling / UGC");
           </div>
         </div>
       )}
-    </div>
-
       {isAddTiktokModalOpen && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-md w-full p-6 shadow-xl space-y-4">
@@ -1314,5 +1331,6 @@ const [newContentType, setNewContentType] = useState("Soft Selling / UGC");
           </div>
         </div>
       )}
+    </div>
   );
 }
