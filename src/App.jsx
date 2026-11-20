@@ -5,7 +5,7 @@ import { createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswor
 import { collection, doc, setDoc, addDoc, updateDoc, onSnapshot, query, orderBy, serverTimestamp, getDoc } from "firebase/firestore";
 
 const BRAND_LOGO_URL = "/Logo_3.jpeg";
-const ROLES = ["Brand Manager", "Social Media Specialist", "Video Editor"];
+const ROLES = ["Brand Manager", "Video Editor"];
 const PLATFORMS = ["TikTok", "Instagram Reels", "YouTube Shorts"];
 
 const STATUS_CONFIG = {
@@ -238,7 +238,77 @@ export default function App() {
   const [newTitle, setNewTitle] = useState("");
   const [newBrand, setNewBrand] = useState("");
   const [newPlatform, setNewPlatform] = useState("TikTok");
-  const [newContentType, setNewContentType] = useState("Soft Selling / UGC");
+  const TIKTOK_CONTENT_TYPES = [
+  "Gudang",
+  "Motion Graphic",
+  "Trend",
+  "QnA /Talking head Pemasaran",
+  "One Person Conversation",
+  "No Face",
+  "Story Talling Gudang"
+];
+const [newContentType, setNewContentType] = useState("Soft Selling / UGC");
+  const [tiktokAccounts, setTiktokAccounts] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("cf_tiktok_accounts") || "[]");
+      return Array.isArray(saved) ? saved : [];
+    } catch {
+      return [];
+    }
+  });
+  const [isAddTiktokModalOpen, setIsAddTiktokModalOpen] = useState(false);
+  const [ttBrandName, setTtBrandName] = useState("");
+  const [ttAccountName, setTtAccountName] = useState("");
+  const [ttSelectedTypes, setTtSelectedTypes] = useState([]);
+
+  const toggleTtContentType = (typeName) => {
+    setTtSelectedTypes((prev) =>
+      prev.includes(typeName) ? prev.filter((item) => item !== typeName) : [...prev, typeName]
+    );
+  };
+
+  const handleSaveTiktokAccount = (e) => {
+    e.preventDefault();
+    const cleanBrand = ttBrandName.trim();
+    let cleanAccount = ttAccountName.trim();
+    if (!cleanBrand || !cleanAccount || ttSelectedTypes.length === 0) return;
+    if (!cleanAccount.startsWith("@")) cleanAccount = "@" + cleanAccount;
+
+    const newItem = {
+      id: "tt_" + Date.now(),
+      brandName: cleanBrand,
+      accountName: cleanAccount,
+      contentTypes: ttSelectedTypes
+    };
+
+    setTiktokAccounts((prev) => {
+      const filtered = prev.filter(
+        (item) => item.accountName.toLowerCase() !== cleanAccount.toLowerCase()
+      );
+      const updated = [newItem, ...filtered];
+      try {
+        localStorage.setItem("cf_tiktok_accounts", JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    setNewBrand(cleanAccount);
+    setNewContentType(ttSelectedTypes[0] || "");
+    setTtBrandName("");
+    setTtAccountName("");
+    setTtSelectedTypes([]);
+    setIsAddTiktokModalOpen(false);
+  };
+
+  const matchedTiktokAccount = tiktokAccounts.find(
+    (item) =>
+      item.accountName.toLowerCase() === (newBrand || "").trim().toLowerCase() ||
+      item.brandName.toLowerCase() === (newBrand || "").trim().toLowerCase()
+  );
+  const availableContentTypes =
+    matchedTiktokAccount && Array.isArray(matchedTiktokAccount.contentTypes) && matchedTiktokAccount.contentTypes.length > 0
+      ? matchedTiktokAccount.contentTypes
+      : TIKTOK_CONTENT_TYPES;
   const [newDeadline, setNewDeadline] = useState("2026-11-25");
   const [newPriority, setNewPriority] = useState("Normal");
   const [newBrief, setNewBrief] = useState("");
@@ -605,7 +675,7 @@ export default function App() {
 
             </div>
             <div className="mt-8 pt-4 border-t border-white/15 text-xs text-sky-100">
-              Role: <span className="text-amber-300 font-semibold">Brand Manager</span> • <span className="text-amber-300 font-semibold">Social Media Specialist</span> • <span className="text-amber-300 font-semibold">Video Editor</span>
+              Role: <span className="text-amber-300 font-semibold">Brand Manager</span> • <span className="text-amber-300 font-semibold">Video Editor</span>
             </div>
           </div>
 
@@ -778,6 +848,13 @@ export default function App() {
             <p className="text-xs text-slate-500 mt-0.5">Tersinkronisasi langsung dengan Firestore • Anggota tim terdaftar: {teamUsers.length} orang.</p>
           </div>
           {currentUser.role !== "Video Editor" && (
+            <button
+                type="button"
+                onClick={() => setIsAddTiktokModalOpen(true)}
+                className="px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-500 text-slate-950 text-xs font-bold cursor-pointer"
+              >
+                + Tambah Akun TikTok
+              </button>
             <button type="button" onClick={() => setIsNewOrderOpen(true)} className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold transition cursor-pointer shrink-0">
               <Plus className="w-4 h-4" />Buat Order Video
             </button>
@@ -856,7 +933,12 @@ export default function App() {
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Akun Tiktok</label>
-                  <input type="text" required value={newBrand} onChange={(e) => setNewBrand(e.target.value)} placeholder="Contoh: @primagold.id" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+                  <input list="daftar-akun-tiktok" type="text" required value={newBrand} onChange={(e) =>
+                  <datalist id="daftar-akun-tiktok">
+                    {tiktokAccounts.map((acc) => (
+                      <option key={acc.id} value={acc.accountName}>{acc.accountName} ({acc.brandName})</option>
+                    ))}
+                  </datalist> setNewBrand(e.target.value)} placeholder="Contoh: @primagold.id" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Platform</label>
@@ -868,11 +950,7 @@ export default function App() {
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Jenis konten</label>
                   <input list="jenis-konten-list" type="text" required value={newContentType} onChange={(e) => setNewContentType(e.target.value)} placeholder="Pilih / ketik jenis konten" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white" />
                   <datalist id="jenis-konten-list">
-                    <option value="Soft Selling / UGC" />
-                    <option value="Hard Selling" />
-                    <option value="Drama / Story" />
-                    <option value="Edukasi / Tips" />
-                    <option value="Review Produk" />
+                    {availableContentTypes.map((ct) => <option key={ct} value={ct} />)}
                   </datalist>
                 </div>
               </div>
@@ -1155,5 +1233,86 @@ export default function App() {
         </div>
       )}
     </div>
+
+      {isAddTiktokModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 max-w-md w-full p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-base text-slate-900">Tambah Akun TikTok</h3>
+              <button
+                type="button"
+                onClick={() => setIsAddTiktokModalOpen(false)}
+                className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveTiktokAccount} className="space-y-3.5">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Nama Brand <span className="text-rose-600">*</span></label>
+                <input
+                  type="text"
+                  required
+                  value={ttBrandName}
+                  onChange={(e) => setTtBrandName(e.target.value)}
+                  placeholder="Contoh: PrimaGold"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Nama Akun TikTok <span className="text-rose-600">*</span></label>
+                <input
+                  type="text"
+                  required
+                  value={ttAccountName}
+                  onChange={(e) => setTtAccountName(e.target.value)}
+                  placeholder="Contoh: @primagold.id"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                  Pilihan Jenis Konten (Bisa pilih lebih dari 1) <span className="text-rose-600">*</span>
+                </label>
+                <div className="space-y-1.5 max-h-52 overflow-y-auto p-2.5 rounded-xl border border-slate-200 bg-slate-50/70">
+                  {TIKTOK_CONTENT_TYPES.map((ct) => {
+                    const checked = ttSelectedTypes.includes(ct);
+                    return (
+                      <label key={ct} className="flex items-center gap-2 text-xs text-slate-800 cursor-pointer py-0.5">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleTtContentType(ct)}
+                          className="rounded border-slate-300"
+                        />
+                        <span>{ct}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+                {ttSelectedTypes.length === 0 && (
+                  <p className="text-[11px] text-rose-600 mt-1">Pilih minimal 1 jenis konten.</p>
+                )}
+              </div>
+              <div className="pt-2 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsAddTiktokModalOpen(false)}
+                  className="px-4 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={ttSelectedTypes.length === 0}
+                  className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white text-xs font-semibold cursor-pointer"
+                >
+                  Simpan Akun TikTok
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
   );
 }
