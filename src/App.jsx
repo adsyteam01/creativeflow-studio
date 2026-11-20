@@ -277,7 +277,7 @@ const [newContentType, setNewContentType] = useState("");
     e.preventDefault();
     const cleanBrand = ttBrandName.trim();
     let cleanAccount = ttAccountName.trim();
-    if (!cleanBrand || !cleanAccount || (Array.isArray(ttSelectedTypes) ? (Array.isArray(ttSelectedTypes) ? ttSelectedTypes.length : 0) : 0) === 0) return;
+    if (!cleanBrand || !cleanAccount || (Array.isArray(ttSelectedTypes) ? ttSelectedTypes.length : 0) === 0) return;
     if (!cleanAccount.startsWith("@")) cleanAccount = "@" + cleanAccount;
 
     const newItem = {
@@ -852,7 +852,7 @@ const [newContentType, setNewContentType] = useState("");
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-5 rounded-2xl border border-sky-100">
           <div>
             <h2 className="text-lg font-bold text-slate-900">Antrean Produksi Video Vertikal (9:16)</h2>
-            <p className="text-xs text-slate-500 mt-0.5">Tersinkronisasi langsung dengan Firestore • Anggota tim terdaftar: {(Array.isArray(teamUsers) ? (Array.isArray(teamUsers) ? teamUsers.length : 0) : 0)} orang.</p>
+            <p className="text-xs text-slate-500 mt-0.5">Tersinkronisasi langsung dengan Firestore • Anggota tim terdaftar: {(Array.isArray(teamUsers) ? teamUsers.length : 0)} orang.</p>
           </div>
           {currentUser.role !== "Video Editor" && (
             <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -1067,7 +1067,7 @@ const [newContentType, setNewContentType] = useState("");
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Video Editor</label>
                   <select value={newAssignedEditor} onChange={(e) => setNewAssignedEditor(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white">
-                    {(Array.isArray(editors) ? (Array.isArray(editors) ? editors.length : 0) : 0) === 0 ? <option value="">Semua Editor</option> : editors.map((ed) => <option key={ed.id} value={ed.name}>{ed.name}</option>)}
+                    {(Array.isArray(editors) ? editors.length : 0) === 0 ? <option value="">Semua Editor</option> : editors.map((ed) => <option key={ed.id} value={ed.name}>{ed.name}</option>)}
                   </select>
                 </div>
               </div>
@@ -1294,7 +1294,7 @@ const [newContentType, setNewContentType] = useState("");
                 <div className="text-xs font-bold text-slate-700">Riwayat Notifikasi WA (Tersimpan di Firestore)</div>
                 <button type="button" onClick={handleMarkAllWaAsRead} className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold cursor-pointer">Tandai Semua Dibaca</button>
               </div>
-              {(Array.isArray(waLogs) ? (Array.isArray(waLogs) ? waLogs.length : 0) : 0) === 0 ? (
+              {(Array.isArray(waLogs) ? waLogs.length : 0) === 0 ? (
                 <p className="text-xs text-slate-400">Belum ada log notifikasi WA.</p>
               ) : waLogs.map((log) => {
                 const isRead = (Array.isArray(readWaLogIds) && readWaLogIds.includes(log.id));
@@ -1368,7 +1368,7 @@ const [newContentType, setNewContentType] = useState("");
                     );
                   })}
                 </div>
-                {(Array.isArray(ttSelectedTypes) ? (Array.isArray(ttSelectedTypes) ? ttSelectedTypes.length : 0) : 0) === 0 && (
+                {(Array.isArray(ttSelectedTypes) ? ttSelectedTypes.length : 0) === 0 && (
                   <p className="text-[11px] text-rose-600 mt-1">Pilih minimal 1 jenis konten.</p>
                 )}
               </div>
@@ -1382,7 +1382,7 @@ const [newContentType, setNewContentType] = useState("");
                 </button>
                 <button
                   type="submit"
-                  disabled={(Array.isArray(ttSelectedTypes) ? (Array.isArray(ttSelectedTypes) ? ttSelectedTypes.length : 0) : 0) === 0}
+                  disabled={(Array.isArray(ttSelectedTypes) ? ttSelectedTypes.length : 0) === 0}
                   className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white text-xs font-semibold cursor-pointer"
                 >
                   Simpan Akun TikTok
