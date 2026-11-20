@@ -276,10 +276,45 @@ const [newContentType, setNewContentType] = useState("");
   const [accountStatusFilter, setAccountStatusFilter] = useState("Semua");
   const [accountPlatformFilter, setAccountPlatformFilter] = useState("Semua");
   const [tiktokContentFilter, setTiktokContentFilter] = useState("Semua"); // "Semua" | "Siap Posting" | "Sudah Diposting" | "Proses"
+  const [brandManagerContentTypes, setBrandManagerContentTypes] = useState([]);
+  const [ttBrandLogo, setTtBrandLogo] = useState("");
+  const [editTtBrandLogo, setEditTtBrandLogo] = useState("");
   const [isAddTiktokModalOpen, setIsAddTiktokModalOpen] = useState(false);
   const [ttBrandName, setTtBrandName] = useState("");
   const [ttAccountName, setTtAccountName] = useState("");
   const [ttSelectedTypes, setTtSelectedTypes] = useState([]);
+
+  const readImageFileAsDataUrl = (file) =>
+    new Promise((resolve, reject) => {
+      if (!file) return resolve("");
+      if (!file.type || !file.type.startsWith("image/")) {
+        return reject(new Error("File harus berupa gambar (PNG, JPG, WEBP, dll)."));
+      }
+      if (file.size > 900 * 1024) {
+        return reject(new Error("Ukuran logo maksimal 900 KB agar penyimpanan tetap ringan."));
+      }
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error("Gagal membaca file logo."));
+      reader.readAsDataURL(file);
+    });
+
+  const handleTtLogoFileChange = async (e, target = "add") => {
+    const file = e.target?.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl = await readImageFileAsDataUrl(file);
+      if (target === "edit") {
+        setEditTtBrandLogo(dataUrl);
+      } else {
+        setTtBrandLogo(dataUrl);
+      }
+    } catch (err) {
+      alert(err?.message || "Gagal memuat logo.");
+    } finally {
+      e.target.value = "";
+    }
+  };
 
   const toggleTtContentType = (typeName) => {
     setTtSelectedTypes((prev) =>
@@ -327,7 +362,8 @@ const [newContentType, setNewContentType] = useState("");
     setNewContentType(cleanTypes[0] || "");
     setTtBrandName("");
     setTtAccountName("");
-    setTtSelectedTypes([]);
+      setTtSelectedTypes([]);
+      setTtBrandLogo("");
     setIsAddTiktokModalOpen(false);
 
     try {
@@ -342,6 +378,8 @@ const [newContentType, setNewContentType] = useState("");
         const docRef = await addDoc(collection(db, "tiktokAccounts"), {
           brandName: cleanBrand,
           accountName: cleanAccount,
+        logoUrl: ttBrandLogo.trim(),
+        brandLogo: ttBrandLogo.trim(),
           contentTypes: cleanTypes,
           createdAtMs,
           createdAt: serverTimestamp(),
@@ -732,6 +770,7 @@ const [newContentType, setNewContentType] = useState("");
     setTiktokContentFilter("Semua");
     setEditTtBrandName(account.brandName || "");
     setEditTtAccountName(account.accountName || "");
+    setEditTtBrandLogo(account?.logoUrl || account?.brandLogo || "");
     setEditTtSelectedTypes(Array.isArray(account.contentTypes) ? account.contentTypes : []);
     setEditTtCustomType("");
   };
@@ -1947,6 +1986,37 @@ const [newContentType, setNewContentType] = useState("");
                       </div>
                     </div>
 
+                    {/* LOGO_EDIT_SECTION */}
+                    <div className="space-y-2">
+                      <label className="block text-xs font-semibold text-slate-700">Logo Brand</label>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <div className="w-12 h-12 rounded-xl border border-slate-200 bg-slate-50 flex items-center justify-center overflow-hidden shrink-0">
+                          {editTtBrandLogo ? (
+                            <img src={editTtBrandLogo} alt="Logo Brand" className="w-full h-full object-cover" />
+                          ) : (
+                            <span className="text-[11px] font-bold text-slate-400">LOGO</span>
+                          )}
+                        </div>
+                        <label className="px-3 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 cursor-pointer">
+                          Pilih / Ganti Logo
+                          <input
+                            type="file"
+                            accept="image/*"
+                            onChange={(e) => handleTtLogoFileChange(e, "edit")}
+                            className="hidden"
+                          />
+                        </label>
+                        {editTtBrandLogo && (
+                          <button
+                            type="button"
+                            onClick={() => setEditTtBrandLogo("")}
+                            className="px-3 py-2 rounded-xl text-xs font-semibold text-rose-600 hover:bg-rose-50 cursor-pointer"
+                          >
+                            Hapus Logo
+                          </button>
+                        )}
+                      </div>
+                    </div>
                     <div className="space-y-2">
                       <label className="block text-xs font-semibold text-slate-700">
                         Jenis Konten Akun (Tambah / Hapus Tag)
@@ -2036,7 +2106,64 @@ const [newContentType, setNewContentType] = useState("");
                 <X className="w-4 h-4" />
               </button>
             </div>
+            {/* LOGO_ADD_SECTION */}
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-slate-700">Logo Brand (Opsional)</label>
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-xl border border-slate-200 bg-slate-50 flex items-center justify-center overflow-hidden shrink-0">
+                  {ttBrandLogo ? (
+                    <img src={ttBrandLogo} alt="Preview Logo Brand" className="w-full h-full object-cover" />
+                  ) : (
+                    <span className="text-[10px] font-bold text-slate-400">LOGO</span>
+                  )}
+                </div>
+                <label className="px-3 py-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 cursor-pointer">
+                  Upload Logo
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => handleTtLogoFileChange(e, "add")}
+                    className="hidden"
+                  />
+                </label>
+                {ttBrandLogo && (
+                  <button
+                    type="button"
+                    onClick={() => setTtBrandLogo("")}
+                    className="text-xs font-semibold text-rose-600 hover:underline cursor-pointer"
+                  >
+                    Hapus
+                  </button>
+                )}
+              </div>
+            </div>
             <form onSubmit={handleSaveTiktokAccount} className="space-y-3.5">
+              {/* SYNCED_CONTENT_TYPE_DROPDOWN */}
+              <div className="space-y-1">
+                <label className="block text-xs font-semibold text-slate-700">
+                  Pilih Jenis Konten (Tersinkron Otomatis)
+                </label>
+                <select
+                  value=""
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val) toggleTtContentType(val);
+                  }}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white text-slate-800"
+                >
+                  <option value="">-- Pilih jenis konten untuk ditambahkan --</option>
+                  {Array.from(
+                    new Set([
+                      ...(Array.isArray(brandManagerContentTypes) ? brandManagerContentTypes : []),
+                      ...(Array.isArray(ttSelectedTypes) ? ttSelectedTypes : []),
+                    ])
+                  ).map((ct) => (
+                    <option key={ct} value={ct}>
+                      {ttSelectedTypes.includes(ct) ? `✓ ${ct}` : ct}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">Nama Brand <span className="text-rose-600">*</span></label>
                 <input
