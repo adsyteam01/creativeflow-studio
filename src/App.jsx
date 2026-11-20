@@ -1555,6 +1555,28 @@ const [newContentType, setNewContentType] = useState("");
                       </button>
                     </div>
 
+                    {selectedOrder.status === "Selesai" && !selectedOrder.isPosted && (
+                      <div className="pt-2">
+                        <button
+                          type="button"
+                          disabled={postingOrderDocId === selectedOrder.docId}
+                          onClick={() => handleMarkOrderAsPosted(selectedOrder)}
+                          className="w-full inline-flex items-center justify-center gap-1.5 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-bold text-xs transition cursor-pointer"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          {postingOrderDocId === selectedOrder.docId ? "Menandai Terposting..." : "Posting"}
+                        </button>
+                      </div>
+                    )}
+
+                    {selectedOrder.status === "Selesai" && Boolean(selectedOrder.isPosted) && (
+                      <div className="pt-2">
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-sky-50 text-sky-700 border border-sky-200 text-xs font-semibold">
+                          Sudah Diposting
+                        </span>
+                      </div>
+                    )}
+
                     {selectedOrder.status !== "Review" && (
                       <p className="text-[11px] text-slate-500">
                         Tombol <span className="font-semibold">Revisi</span> dan <span className="font-semibold">Selesai</span> hanya aktif setelah editor mengirim hasil video (status <span className="font-semibold text-indigo-700">Review</span>).
