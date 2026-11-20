@@ -384,6 +384,19 @@ const [newContentType, setNewContentType] = useState("");
           createdAtMs,
           createdAt: serverTimestamp(),
         });
+      setTiktokAccounts((prev) => {
+        const nextItem = {
+          id: docRef.id,
+          docId: docRef.id,
+          brandName: ttBrandName.trim(),
+          accountName: formattedAccountName,
+          platform: "TikTok",
+          logoUrl: ttBrandLogo.trim(),
+          brandLogo: ttBrandLogo.trim(),
+          contentTypes: Array.from(new Set(ttSelectedTypes)),
+        };
+        return Array.isArray(prev) ? [nextItem, ...prev] : [nextItem];
+      });
         setTiktokAccounts((prev) => {
           const safePrev = Array.isArray(prev) ? prev : [];
           const synced = safePrev.map((item) =>
@@ -1444,15 +1457,26 @@ const [newContentType, setNewContentType] = useState("");
               <div className="md:col-span-7 space-y-4">
                 <div className="text-xs text-slate-600 space-y-1.5 bg-slate-50 p-3.5 rounded-xl border border-slate-200/70">
                   <div><span className="font-semibold text-slate-800">Pemesan:</span> {selectedOrder.requestedBy} ({selectedOrder.requestedByRole})</div>
-                  <div><span className="font-semibold text-slate-800">Editor:</span> {selectedOrder.assignedEditor}</div>
-                  <div><span className="font-semibold text-slate-800">Deadline:</span> {selectedOrder.deadline} • <span className="font-semibold">Prioritas:</span> {selectedOrder.priority}</div>
-                  <div className="pt-1"><span className="font-semibold text-slate-800">Brief:</span> {selectedOrder.brief}</div>
-                  {selectedOrder.referenceUrl && (
-                    <div className="pt-1">
-                      <span className="font-semibold text-slate-800">Referensi:</span>{" "}
+                  <div><span className="font-semibold text-slate-800">Editor:</span> {selectedOrder.assignedEditor || "-"}</div>
+                  <div><span className="font-semibold text-slate-800">Deadline:</span> {selectedOrder.deadline || "-"}</div>
+                  <div><span className="font-semibold text-slate-800">Prioritas:</span> {selectedOrder.priority || "Normal"}</div>
+                  <div className="pt-1">
+                    <span className="font-semibold text-slate-800">Referensi:</span>{" "}
+                    {selectedOrder.referenceUrl ? (
                       <a href={selectedOrder.referenceUrl} target="_blank" rel="noreferrer" className="text-sky-700 underline break-all">{selectedOrder.referenceUrl}</a>
-                    </div>
-                  )}
+                    ) : (
+                      <span>-</span>
+                    )}
+                  </div>
+                  <div className="pt-1"><span className="font-semibold text-slate-800">Brief:</span> {selectedOrder.brief || "-"}</div>
+                  <div className="pt-1">
+                    <span className="font-semibold text-slate-800">Link RAW Footage:</span>{" "}
+                    {selectedOrder.rawFootageUrl ? (
+                      <a href={selectedOrder.rawFootageUrl} target="_blank" rel="noreferrer" className="text-sky-700 underline break-all">{selectedOrder.rawFootageUrl}</a>
+                    ) : (
+                      <span>-</span>
+                    )}
+                  </div>
                   {selectedOrder.revisionNote && (
                     <div className="mt-2 p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800">
                       <span className="font-bold">Catatan Revisi:</span> {selectedOrder.revisionNote}
@@ -2138,33 +2162,7 @@ const [newContentType, setNewContentType] = useState("");
               </div>
             </div>
             <form onSubmit={handleSaveTiktokAccount} className="space-y-3.5">
-              {/* SYNCED_CONTENT_TYPE_DROPDOWN */}
-              <div className="space-y-1">
-                <label className="block text-xs font-semibold text-slate-700">
-                  Pilih Jenis Konten (Tersinkron Otomatis)
-                </label>
-                <select
-                  value=""
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    if (val) toggleTtContentType(val);
-                  }}
-                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white text-slate-800"
-                >
-                  <option value="">-- Pilih jenis konten untuk ditambahkan --</option>
-                  {Array.from(
-                    new Set([
-                      ...(Array.isArray(brandManagerContentTypes) ? brandManagerContentTypes : []),
-                      ...(Array.isArray(ttSelectedTypes) ? ttSelectedTypes : []),
-                    ])
-                  ).map((ct) => (
-                    <option key={ct} value={ct}>
-                      {ttSelectedTypes.includes(ct) ? `✓ ${ct}` : ct}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
+                            <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">Nama Brand <span className="text-rose-600">*</span></label>
                 <input
                   type="text"
@@ -2191,7 +2189,7 @@ const [newContentType, setNewContentType] = useState("");
                   Pilihan Jenis Konten (Bisa pilih lebih dari 1) <span className="text-rose-600">*</span>
                 </label>
                 <div className="space-y-1.5 max-h-52 overflow-y-auto p-2.5 rounded-xl border border-slate-200 bg-slate-50/70">
-                  {TIKTOK_CONTENT_TYPES.map((ct) => {
+                  {Array.from(new Set([...(Array.isArray(TIKTOK_CONTENT_TYPES) ? TIKTOK_CONTENT_TYPES : []), ...(Array.isArray(brandManagerContentTypes) ? brandManagerContentTypes : []), ...(Array.isArray(ttSelectedTypes) ? ttSelectedTypes : [])])).map((ct) => {
                     const checked = ttSelectedTypes.includes(ct);
                     return (
                       <label key={ct} className="flex items-center gap-2 text-xs text-slate-800 cursor-pointer py-0.5">
