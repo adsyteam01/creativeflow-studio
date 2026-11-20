@@ -243,6 +243,7 @@ export default function App() {
   const [newPriority, setNewPriority] = useState("Normal");
   const [newBrief, setNewBrief] = useState("");
   const [newReferenceUrl, setNewReferenceUrl] = useState("");
+  const [newRawFootageUrl, setNewRawFootageUrl] = useState("");
   const [newAssignedEditor, setNewAssignedEditor] = useState("");
 
   const [waWebhookUrl, setWaWebhookUrl] = useState(() => localStorage.getItem("cf_wa_webhook") || "");
@@ -465,6 +466,7 @@ export default function App() {
       status: "Antrean",
       brief: newBrief.trim() || "Brief video vertikal 9:16 siap dikerjakan.",
       referenceUrl: newReferenceUrl.trim(),
+        rawFootageUrl: newRawFootageUrl.trim(),
       previewUrl: "",
       revisionNote: "",
       requestedBy: currentUser.name,
@@ -477,6 +479,7 @@ export default function App() {
     await addDoc(collection(db, "orders"), newOrderData);
     setIsNewOrderOpen(false);
     setNewTitle(""); setNewBrand(""); setNewBrief(""); setNewReferenceUrl("");
+      setNewRawFootageUrl("");
 
     const targetEditors = teamUsers.filter((u) => u.role === "Video Editor" && (!assigned || u.name === assigned));
     await triggerAutoWhatsApp({
@@ -877,6 +880,24 @@ export default function App() {
                 <label className="block text-xs font-semibold text-slate-700 mb-1">Judul Konten</label>
                 <input type="text" required value={newTitle} onChange={(e) => setNewTitle(e.target.value)} placeholder="Contoh: Hook 3 Detik Promo Spesial" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
               </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Link Referensi (Opsional)</label>
+                <input type="url" value={newReferenceUrl} onChange={(e) => setNewReferenceUrl(e.target.value)} placeholder="https://..." className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Brief & Catatan Visual</label>
+                <textarea rows={3} value={newBrief} onChange={(e) => setNewBrief(e.target.value)} placeholder="Tulis hook, pacing, caption, atau referensi gaya edit..." className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Link RAW Footage <span className="text-rose-600">*</span></label>
+                <input type="url" required value={newRawFootageUrl} onChange={(e) => setNewRawFootageUrl(e.target.value)} placeholder="https://drive.google.com/..." className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+              </div>
+
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Link RAW Footage <span className="text-rose-600">*</span></label>
+                <input type="url" required value={newRawFootageUrl} onChange={(e) => setNewRawFootageUrl(e.target.value)} placeholder="https://drive.google.com/..." className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+              </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Deadline</label>
@@ -896,14 +917,8 @@ export default function App() {
                   </select>
                 </div>
               </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Brief & Catatan Visual</label>
-                <textarea rows={3} value={newBrief} onChange={(e) => setNewBrief(e.target.value)} placeholder="Tulis hook, pacing, caption, atau referensi gaya edit..." className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Link Referensi (Opsional)</label>
-                <input type="url" value={newReferenceUrl} onChange={(e) => setNewReferenceUrl(e.target.value)} placeholder="https://..." className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
-              </div>
+
+
               <div className="pt-2 flex justify-end gap-2">
                 <button type="button" onClick={() => setIsNewOrderOpen(false)} className="px-4 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 cursor-pointer">Batal</button>
                 <button type="submit" className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold cursor-pointer">Kirim Order (Otomatis Antrean + WA)</button>
