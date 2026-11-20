@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import { Plus, Search, Clock, AlertCircle, Play, Pause, Volume2, VolumeX, Download, Bell, Film, LogOut, X, Smartphone, ChevronRight, Database, CheckCircle2, RotateCcw, Send, Wrench, Eye, EyeOff } from "lucide-react";
 import { auth, db } from "./firebase";
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, onAuthStateChanged, signOut } from "firebase/auth";
-import { collection, doc, setDoc, addDoc, updateDoc, onSnapshot, query, orderBy, serverTimestamp, getDoc } from "firebase/firestore";
+import {collection, doc, setDoc, addDoc, updateDoc, onSnapshot, query, orderBy, serverTimestamp, getDoc, deleteDoc} from "firebase/firestore";
 
 const BRAND_LOGO_URL = "/Logo_3.jpeg";
 const ROLES = ["Brand Manager", "Video Editor"];
@@ -262,6 +262,16 @@ const [newContentType, setNewContentType] = useState("");
     }
   });
   const [isTiktokDropdownOpen, setIsTiktokDropdownOpen] = useState(false);
+  const [activeTiktokAccountId, setActiveTiktokAccountId] = useState(null);
+  const [tiktokDrawerTab, setTiktokDrawerTab] = useState("monitoring"); // "monitoring" | "edit"
+  const [editTtBrandName, setEditTtBrandName] = useState("");
+  const [editTtAccountName, setEditTtAccountName] = useState("");
+  const [editTtSelectedTypes, setEditTtSelectedTypes] = useState([]);
+  const [editTtCustomType, setEditTtCustomType] = useState("");
+  const [isSavingTtEdit, setIsSavingTtEdit] = useState(false);
+  const [isDeletingTtAccount, setIsDeletingTtAccount] = useState(false);
+  const [postingOrderDocId, setPostingOrderDocId] = useState(null);
+  const [tiktokContentFilter, setTiktokContentFilter] = useState("Semua"); // "Semua" | "Siap Posting" | "Sudah Diposting" | "Proses"
   const [isAddTiktokModalOpen, setIsAddTiktokModalOpen] = useState(false);
   const [ttBrandName, setTtBrandName] = useState("");
   const [ttAccountName, setTtAccountName] = useState("");
@@ -583,6 +593,7 @@ const [newContentType, setNewContentType] = useState("");
       deadline: newDeadline,
       priority: newPriority,
       status: "Antrean",
+      isPosted: false,
       brief: newBrief.trim() || "Brief video vertikal 9:16 siap dikerjakan.",
       referenceUrl: newReferenceUrl.trim(),
         rawFootageUrl: newRawFootageUrl.trim(),
@@ -666,6 +677,137 @@ const [newContentType, setNewContentType] = useState("");
   };
 
   // 5. BM / SMS klik "Selesai" -> status jadi "Selesai" & TANPA kirim WA
+  const isOrderMatchedToTiktokAccount = (order, account) => {
+    if (!order || !account) return false;
+    const orderBrand = String(order.brand || "").trim().toLowerCase();
+    const handle = String(account.accountName || "").trim().toLowerCase();
+    const brandName = String(account.brandName || "").trim().toLowerCase();
+    return Boolean(
+      (handle && orderBrand === handle) ||
+      (brandName && orderBrand === brandName) ||
+      (handle && orderBrand.includes(handle))
+    );
+  };
+
+  const activeTiktokAccount = useMemo(() => {
+    const list = Array.isArray(tiktokAccounts) ? tiktokAccounts : [];
+    return list.find((acc) => acc.id === activeTiktokAccountId) || null;
+  }, [tiktokAccounts, activeTiktokAccountId]);
+
+  const openTiktokAccountManager = (account, initialTab = "monitoring") => {
+    if (!account) return;
+    setActiveTiktokAccountId(account.id);
+    setTiktokDrawerTab(initialTab);
+    setTiktokContentFilter("Semua");
+    setEditTtBrandName(account.brandName || "");
+    setEditTtAccountName(account.accountName || "");
+    setEditTtSelectedTypes(Array.isArray(account.contentTypes) ? account.contentTypes : []);
+    setEditTtCustomType("");
+  };
+
+  const toggleEditTtContentType = (typeName) => {
+    setEditTtSelectedTypes((prev) => {
+      const safe = Array.isArray(prev) ? prev : [];
+      return safe.includes(typeName) ? safe.filter((item) => item !== typeName) : [...safe, typeName];
+    });
+  };
+
+  const handleAddEditTtCustomType = () => {
+    const clean = (editTtCustomType || "").trim();
+    if (!clean) return;
+    setEditTtSelectedTypes((prev) => {
+      const safe = Array.isArray(prev) ? prev : [];
+      return safe.some((t) => t.toLowerCase() === clean.toLowerCase()) ? safe : [...safe, clean];
+    });
+    setEditTtCustomType("");
+  };
+
+  const handleUpdateTiktokAccountDetail = async (e) => {
+    e.preventDefault();
+    if (!activeTiktokAccount) return;
+    const cleanBrand = (editTtBrandName || "").trim();
+    let cleanHandle = (editTtAccountName || "").trim();
+    const cleanTypes = sanitizeContentTypes(Array.isArray(editTtSelectedTypes) ? editTtSelectedTypes : []);
+    if (!cleanBrand || !cleanHandle || cleanTypes.length === 0) return;
+    if (!cleanHandle.startsWith("@")) cleanHandle = "@" + cleanHandle;
+
+    setIsSavingTtEdit(true);
+    try {
+      const hasFirestoreId = Boolean(activeTiktokAccount.id && !String(activeTiktokAccount.id).startsWith("tt_"));
+      if (hasFirestoreId) {
+        await updateDoc(doc(db, "tiktokAccounts", activeTiktokAccount.id), {
+          brandName: cleanBrand,
+          accountName: cleanHandle,
+          contentTypes: cleanTypes,
+          updatedAt: serverTimestamp(),
+        });
+      }
+      setTiktokAccounts((prev) => {
+        const safe = Array.isArray(prev) ? prev : [];
+        const updated = safe.map((item) =>
+          item.id === activeTiktokAccount.id
+            ? { ...item, brandName: cleanBrand, accountName: cleanHandle, contentTypes: cleanTypes }
+            : item
+        );
+        try {
+          localStorage.setItem("cf_tiktok_accounts", JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+      setTiktokDrawerTab("monitoring");
+    } catch (err) {
+      console.error("Gagal memperbarui detail akun TikTok:", err);
+    } finally {
+      setIsSavingTtEdit(false);
+    }
+  };
+
+  const handleDeleteTiktokAccount = async () => {
+    if (!activeTiktokAccount) return;
+    const confirmed = window.confirm(
+      "Hapus akun TikTok " + (activeTiktokAccount.accountName || activeTiktokAccount.brandName) + "? Riwayat order yang sudah ada tetap aman."
+    );
+    if (!confirmed) return;
+
+    setIsDeletingTtAccount(true);
+    const targetId = activeTiktokAccount.id;
+    try {
+      const hasFirestoreId = Boolean(targetId && !String(targetId).startsWith("tt_"));
+      if (hasFirestoreId) {
+        await deleteDoc(doc(db, "tiktokAccounts", targetId));
+      }
+      setTiktokAccounts((prev) => {
+        const safe = Array.isArray(prev) ? prev : [];
+        const remaining = safe.filter((item) => item.id !== targetId);
+        try {
+          localStorage.setItem("cf_tiktok_accounts", JSON.stringify(remaining));
+        } catch {}
+        return remaining;
+      });
+      setActiveTiktokAccountId(null);
+    } catch (err) {
+      console.error("Gagal menghapus akun TikTok:", err);
+    } finally {
+      setIsDeletingTtAccount(false);
+    }
+  };
+
+  const handleMarkOrderAsPosted = async (order) => {
+    if (!order || !order.docId) return;
+    setPostingOrderDocId(order.docId);
+    try {
+      await updateDoc(doc(db, "orders", order.docId), {
+        isPosted: true,
+        postedAtMs: Date.now(),
+        postedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      console.error("Gagal menandai konten sebagai sudah diposting:", err);
+    } finally {
+      setPostingOrderDocId(null);
+    }
+  };
+
   const handleApproveComplete = async () => {
     if (!selectedOrder) return;
     await updateDoc(doc(db, "orders", selectedOrder.docId), {
@@ -910,6 +1052,113 @@ const [newContentType, setNewContentType] = useState("");
             </button>
             </div>
           )}
+
+          {/* Grid Card Akun TikTok (Real-Time dari Firestore) */}
+          <section className="space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-baseline gap-2.5">
+                <h2 className="text-base font-bold text-slate-900">Akun TikTok</h2>
+                <span className="text-xs font-medium text-slate-500">
+                  {(tiktokAccounts?.length ?? 0)} akun
+                </span>
+              </div>
+              <span className="text-[11px] text-slate-400">
+                Sinkron real-time • Klik "Buka akun" untuk kelola jenis konten & monitoring order
+              </span>
+            </div>
+
+            {(tiktokAccounts?.length ?? 0) === 0 ? (
+              <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-6 text-center space-y-2">
+                <p className="text-sm font-semibold text-slate-700">Belum ada akun TikTok terdaftar</p>
+                <p className="text-xs text-slate-500">
+                  Klik tombol "+ Tambah Akun TikTok" di atas untuk menambahkan akun pertama Anda.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {(Array.isArray(tiktokAccounts) ? tiktokAccounts : []).map((account) => {
+                  const accountOrders = (Array.isArray(orders) ? orders : []).filter((ord) =>
+                    isOrderMatchedToTiktokAccount(ord, account)
+                  );
+                  const readyToPostCount = accountOrders.filter(
+                    (ord) => ord.status === "Selesai" && !ord.isPosted
+                  ).length;
+                  const tags = sanitizeContentTypes(
+                    Array.isArray(account.contentTypes) ? account.contentTypes : []
+                  );
+
+                  return (
+                    <div
+                      key={account.id}
+                      className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs hover:border-slate-300 transition flex flex-col justify-between gap-4"
+                    >
+                      <div className="space-y-3">
+                        <div className="flex items-start gap-3">
+                          <div className="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center font-bold text-sm shrink-0">
+                            ♪
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="font-bold text-sm text-slate-900 truncate">
+                              {account.accountName || account.brandName}
+                            </div>
+                            <div className="text-xs text-slate-500 truncate">
+                              {account.accountName || "-"}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span className="font-medium text-slate-600 truncate">
+                            {account.brandName || "-"}
+                          </span>
+                          <span className="text-[11px] text-slate-400 shrink-0">
+                            {accountOrders.length} konten
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap gap-1.5">
+                          {tags.length > 0 ? (
+                            tags.map((tag) => (
+                              <span
+                                key={tag}
+                                className="px-2.5 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200/80 text-[11px] font-medium"
+                              >
+                                {tag}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="text-[11px] text-slate-400">Belum ada jenis konten</span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
+                        <span
+                          className={
+                            "px-2.5 py-1 rounded-md text-xs font-semibold " +
+                            (readyToPostCount > 0
+                              ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                              : "bg-slate-100 text-slate-600")
+                          }
+                        >
+                          {readyToPostCount} video siap posting
+                        </span>
+
+                        <button
+                          type="button"
+                          onClick={() => openTiktokAccountManager(account, "monitoring")}
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700 hover:text-sky-700 transition cursor-pointer"
+                        >
+                          <span>Buka akun</span>
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
         </div>
 
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -1373,7 +1622,424 @@ const [newContentType, setNewContentType] = useState("");
           </div>
         </div>
       )}
-      {isAddTiktokModalOpen && (
+      {activeTiktokAccount && (() => {
+        const linkedOrders = (Array.isArray(orders) ? orders : []).filter((ord) =>
+          isOrderMatchedToTiktokAccount(ord, activeTiktokAccount)
+        );
+        const readyToPostList = linkedOrders.filter(
+          (ord) => ord.status === "Selesai" && !ord.isPosted
+        );
+        const postedList = linkedOrders.filter(
+          (ord) => ord.status === "Selesai" && Boolean(ord.isPosted)
+        );
+        const inProgressList = linkedOrders.filter((ord) => ord.status !== "Selesai");
+
+        const filteredOrders = linkedOrders.filter((ord) => {
+          if (tiktokContentFilter === "Siap Posting") return ord.status === "Selesai" && !ord.isPosted;
+          if (tiktokContentFilter === "Sudah Diposting") return ord.status === "Selesai" && Boolean(ord.isPosted);
+          if (tiktokContentFilter === "Proses") return ord.status !== "Selesai";
+          return true;
+        });
+
+        const allAvailableTypes = sanitizeContentTypes([
+          ...TIKTOK_CONTENT_TYPES,
+          ...(Array.isArray(editTtSelectedTypes) ? editTtSelectedTypes : []),
+        ]);
+
+        return (
+          <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl border border-slate-200 max-w-4xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+              {/* Header Drawer / Modal */}
+              <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-4 bg-slate-50/70">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center font-bold text-sm shrink-0">
+                    ♪
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="font-bold text-base text-slate-900 truncate">
+                        {activeTiktokAccount.accountName || activeTiktokAccount.brandName}
+                      </h3>
+                      <span className="px-2 py-0.5 rounded-full bg-slate-200/80 text-slate-700 text-[11px] font-semibold">
+                        {activeTiktokAccount.brandName}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500">
+                      Manajemen akun TikTok, jenis konten, serta monitoring status siap posting
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTiktokAccountId(null)}
+                  className="p-2 rounded-xl hover:bg-slate-200/70 text-slate-600 cursor-pointer shrink-0"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Tab Navigasi */}
+              <div className="px-6 pt-3 border-b border-slate-200 flex items-center justify-between gap-3 flex-wrap bg-white">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setTiktokDrawerTab("monitoring")}
+                    className={
+                      "px-3.5 py-2 text-xs font-semibold border-b-2 transition cursor-pointer " +
+                      (tiktokDrawerTab === "monitoring"
+                        ? "border-sky-600 text-sky-700"
+                        : "border-transparent text-slate-500 hover:text-slate-800")
+                    }
+                  >
+                    Monitoring Konten & Siap Posting ({linkedOrders.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTiktokDrawerTab("edit")}
+                    className={
+                      "px-3.5 py-2 text-xs font-semibold border-b-2 transition cursor-pointer " +
+                      (tiktokDrawerTab === "edit"
+                        ? "border-sky-600 text-sky-700"
+                        : "border-transparent text-slate-500 hover:text-slate-800")
+                    }
+                  >
+                    Edit Akun & Jenis Konten
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  disabled={isDeletingTtAccount}
+                  onClick={handleDeleteTiktokAccount}
+                  className="mb-2 px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-semibold transition cursor-pointer disabled:opacity-50"
+                >
+                  {isDeletingTtAccount ? "Menghapus..." : "Hapus Akun"}
+                </button>
+              </div>
+
+              {/* Body Konten */}
+              <div className="p-6 overflow-y-auto space-y-5 flex-1">
+                {tiktokDrawerTab === "monitoring" ? (
+                  <>
+                    {/* Ringkasan Status Konten Akun */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-3.5">
+                        <div className="text-[11px] font-semibold text-emerald-700 uppercase">
+                          Siap Posting
+                        </div>
+                        <div className="text-2xl font-bold text-emerald-900 mt-0.5">
+                          {readyToPostList.length}
+                        </div>
+                        <div className="text-[11px] text-emerald-700/80">
+                          Status "Selesai" & belum diposting
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border border-sky-200 bg-sky-50/70 p-3.5">
+                        <div className="text-[11px] font-semibold text-sky-700 uppercase">
+                          Sudah Diposting
+                        </div>
+                        <div className="text-2xl font-bold text-sky-900 mt-0.5">
+                          {postedList.length}
+                        </div>
+                        <div className="text-[11px] text-sky-700/80">
+                          Sudah diunggah ke TikTok
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5">
+                        <div className="text-[11px] font-semibold text-slate-600 uppercase">
+                          Dalam Produksi
+                        </div>
+                        <div className="text-2xl font-bold text-slate-900 mt-0.5">
+                          {inProgressList.length}
+                        </div>
+                        <div className="text-[11px] text-slate-500">
+                          Antrean / Proses / Review / Revisi
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Bagian Khusus Antrean Siap Posting + Tombol Posting */}
+                    <div className="rounded-2xl border border-emerald-200 bg-emerald-50/30 p-4 space-y-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <h4 className="text-sm font-bold text-slate-900">
+                          Antrean Siap Posting ({readyToPostList.length})
+                        </h4>
+                        <span className="text-[11px] text-slate-500">
+                          Klik "Posting" jika video sudah naik ke akun TikTok
+                        </span>
+                      </div>
+
+                      {readyToPostList.length === 0 ? (
+                        <p className="text-xs text-slate-500 py-2">
+                          Belum ada video berstatus "Selesai" yang menunggu diposting untuk akun ini.
+                        </p>
+                      ) : (
+                        <div className="space-y-2">
+                          {readyToPostList.map((ord) => (
+                            <div
+                              key={ord.docId || ord.id}
+                              className="bg-white rounded-xl border border-slate-200 px-4 py-3 flex items-center justify-between gap-3 flex-wrap"
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-[11px] font-mono font-semibold text-slate-500">
+                                    {ord.id}
+                                  </span>
+                                  <span className="text-sm font-bold text-slate-900 truncate">
+                                    {ord.title}
+                                  </span>
+                                  {ord.contentType && (
+                                    <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 text-[11px] font-medium">
+                                      {ord.contentType}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-xs text-slate-500 mt-0.5">
+                                  Editor: {ord.assignedEditor || "Belum Ditentukan"} • Deadline:{" "}
+                                  {ord.deadline || "-"}
+                                </div>
+                              </div>
+
+                              <button
+                                type="button"
+                                disabled={postingOrderDocId === ord.docId}
+                                onClick={() => handleMarkOrderAsPosted(ord)}
+                                className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white text-xs font-bold transition cursor-pointer shrink-0"
+                              >
+                                {postingOrderDocId === ord.docId ? "Memproses..." : "Posting"}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Monitoring Seluruh Konten di Akun Ini */}
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <h4 className="text-sm font-bold text-slate-900">
+                          Daftar Konten Akun ({filteredOrders.length})
+                        </h4>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {["Semua", "Siap Posting", "Sudah Diposting", "Proses"].map((tabName) => (
+                            <button
+                              key={tabName}
+                              type="button"
+                              onClick={() => setTiktokContentFilter(tabName)}
+                              className={
+                                "px-2.5 py-1 rounded-lg text-xs font-semibold transition cursor-pointer " +
+                                (tiktokContentFilter === tabName
+                                  ? "bg-slate-900 text-white"
+                                  : "bg-slate-100 text-slate-600 hover:bg-slate-200")
+                              }
+                            >
+                              {tabName}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {filteredOrders.length === 0 ? (
+                        <div className="rounded-xl border border-slate-200 p-6 text-center text-xs text-slate-500">
+                          Tidak ada konten yang cocok dengan filter ini.
+                        </div>
+                      ) : (
+                        <div className="overflow-x-auto rounded-xl border border-slate-200">
+                          <table className="w-full text-left border-collapse text-xs">
+                            <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                              <tr>
+                                <th className="py-2.5 px-3 font-semibold">Judul Konten</th>
+                                <th className="py-2.5 px-3 font-semibold">Jenis Konten</th>
+                                <th className="py-2.5 px-3 font-semibold">Editor</th>
+                                <th className="py-2.5 px-3 font-semibold">Deadline</th>
+                                <th className="py-2.5 px-3 font-semibold">Status</th>
+                                <th className="py-2.5 px-3 font-semibold text-right">Aksi</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {filteredOrders.map((ord) => {
+                                const isReady = ord.status === "Selesai" && !ord.isPosted;
+                                const isDonePosted = ord.status === "Selesai" && Boolean(ord.isPosted);
+                                const stCfg = STATUS_CONFIG[ord.status] || {
+                                  label: ord.status || "Antrean",
+                                  badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
+                                };
+
+                                return (
+                                  <tr key={ord.docId || ord.id} className="hover:bg-slate-50/70">
+                                    <td className="py-2.5 px-3 font-semibold text-slate-900">
+                                      <div>{ord.title}</div>
+                                      <div className="text-[11px] font-mono text-slate-400">
+                                        {ord.id}
+                                      </div>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-slate-600">
+                                      {ord.contentType || "-"}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-slate-600">
+                                      {ord.assignedEditor || "Belum Ditentukan"}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-slate-600">
+                                      {ord.deadline || "-"}
+                                    </td>
+                                    <td className="py-2.5 px-3">
+                                      {isDonePosted ? (
+                                        <span className="px-2 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200 font-semibold">
+                                          Sudah Diposting
+                                        </span>
+                                      ) : isReady ? (
+                                        <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
+                                          Siap Posting
+                                        </span>
+                                      ) : (
+                                        <span
+                                          className={
+                                            "px-2 py-0.5 rounded-full border font-semibold " +
+                                            stCfg.badgeClass
+                                          }
+                                        >
+                                          {stCfg.label}
+                                        </span>
+                                      )}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right">
+                                      {isReady ? (
+                                        <button
+                                          type="button"
+                                          disabled={postingOrderDocId === ord.docId}
+                                          onClick={() => handleMarkOrderAsPosted(ord)}
+                                          className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold transition cursor-pointer"
+                                        >
+                                          Posting
+                                        </button>
+                                      ) : (
+                                        <span className="text-[11px] text-slate-400">
+                                          {isDonePosted ? "Selesai tayang" : "-"}
+                                        </span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  /* Tab Edit Akun & Jenis Konten */
+                  <form onSubmit={handleUpdateTiktokAccountDetail} className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-700 mb-1">
+                          Nama Brand
+                        </label>
+                        <input
+                          type="text"
+                          value={editTtBrandName}
+                          onChange={(e) => setEditTtBrandName(e.target.value)}
+                          placeholder="Contoh: PrimaGold"
+                          className="w-full px-3.5 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-sky-500"
+                          required
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-700 mb-1">
+                          Handle / Akun TikTok
+                        </label>
+                        <input
+                          type="text"
+                          value={editTtAccountName}
+                          onChange={(e) => setEditTtAccountName(e.target.value)}
+                          placeholder="@primagold_official"
+                          className="w-full px-3.5 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-sky-500"
+                          required
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="block text-xs font-semibold text-slate-700">
+                        Jenis Konten Akun (Tambah / Hapus Tag)
+                      </label>
+                      <div className="flex flex-wrap gap-2">
+                        {allAvailableTypes.map((typeName) => {
+                          const active = (Array.isArray(editTtSelectedTypes) ? editTtSelectedTypes : []).includes(
+                            typeName
+                          );
+                          return (
+                            <button
+                              key={typeName}
+                              type="button"
+                              onClick={() => toggleEditTtContentType(typeName)}
+                              className={
+                                "px-3 py-1.5 rounded-xl text-xs font-semibold border transition cursor-pointer " +
+                                (active
+                                  ? "bg-emerald-600 text-white border-emerald-600"
+                                  : "bg-white text-slate-600 border-slate-300 hover:bg-slate-50")
+                              }
+                            >
+                              {active ? "✓ " : "+ "}
+                              {typeName}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div className="flex items-center gap-2 pt-2">
+                        <input
+                          type="text"
+                          value={editTtCustomType}
+                          onChange={(e) => setEditTtCustomType(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              handleAddEditTtCustomType();
+                            }
+                          }}
+                          placeholder="Tambah jenis konten kustom baru..."
+                          className="flex-1 px-3.5 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-sky-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleAddEditTtCustomType}
+                          className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold cursor-pointer"
+                        >
+                          Tambah Tag
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setTiktokDrawerTab("monitoring")}
+                        className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50 cursor-pointer"
+                      >
+                        Batal
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={isSavingTtEdit}
+                        className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold transition cursor-pointer disabled:opacity-50"
+                      >
+                        {isSavingTtEdit ? "Menyimpan..." : "Simpan Perubahan Akun"}
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+            {isAddTiktokModalOpen && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-md w-full p-6 shadow-xl space-y-4">
             <div className="flex items-center justify-between">
