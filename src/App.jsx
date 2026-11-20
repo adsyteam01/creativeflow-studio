@@ -271,6 +271,9 @@ const [newContentType, setNewContentType] = useState("");
   const [isSavingTtEdit, setIsSavingTtEdit] = useState(false);
   const [isDeletingTtAccount, setIsDeletingTtAccount] = useState(false);
   const [postingOrderDocId, setPostingOrderDocId] = useState(null);
+  const [accountSearchQuery, setAccountSearchQuery] = useState("");
+  const [accountStatusFilter, setAccountStatusFilter] = useState("Semua");
+  const [accountPlatformFilter, setAccountPlatformFilter] = useState("Semua");
   const [tiktokContentFilter, setTiktokContentFilter] = useState("Semua"); // "Semua" | "Siap Posting" | "Sudah Diposting" | "Proses"
   const [isAddTiktokModalOpen, setIsAddTiktokModalOpen] = useState(false);
   const [ttBrandName, setTtBrandName] = useState("");
@@ -1659,11 +1662,18 @@ const [newContentType, setNewContentType] = useState("");
         );
         const inProgressList = linkedOrders.filter((ord) => ord.status !== "Selesai");
 
+        const q = (accountSearchQuery || "").trim().toLowerCase();
         const filteredOrders = linkedOrders.filter((ord) => {
-          if (tiktokContentFilter === "Siap Posting") return ord.status === "Selesai" && !ord.isPosted;
-          if (tiktokContentFilter === "Sudah Diposting") return ord.status === "Selesai" && Boolean(ord.isPosted);
-          if (tiktokContentFilter === "Proses") return ord.status !== "Selesai";
-          return true;
+          const matchesQuery =
+            !q ||
+            String(ord.id || "").toLowerCase().includes(q) ||
+            String(ord.title || "").toLowerCase().includes(q) ||
+            String(ord.brand || "").toLowerCase().includes(q);
+          const matchesStatus =
+            accountStatusFilter === "Semua" || ord.status === accountStatusFilter;
+          const matchesPlatform =
+            accountPlatformFilter === "Semua" || ord.platform === accountPlatformFilter;
+          return matchesQuery && matchesStatus && matchesPlatform;
         });
 
         const allAvailableTypes = sanitizeContentTypes([
@@ -1673,8 +1683,8 @@ const [newContentType, setNewContentType] = useState("");
 
         return (
           <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-2xl border border-slate-200 max-w-4xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
-              {/* Header Drawer / Modal */}
+            <div className="bg-white rounded-2xl border border-slate-200 max-w-5xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+              {/* Header */}
               <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-4 bg-slate-50/70">
                 <div className="flex items-center gap-3 min-w-0">
                   <div className="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center font-bold text-sm shrink-0">
@@ -1690,7 +1700,7 @@ const [newContentType, setNewContentType] = useState("");
                       </span>
                     </div>
                     <p className="text-xs text-slate-500">
-                      Manajemen akun TikTok, jenis konten, serta monitoring status siap posting
+                      Monitoring konten akun & manajemen akun TikTok
                     </p>
                   </div>
                 </div>
@@ -1704,7 +1714,7 @@ const [newContentType, setNewContentType] = useState("");
                 </button>
               </div>
 
-              {/* Tab Navigasi */}
+              {/* Tab & Aksi Hapus (Khusus Brand Manager) */}
               <div className="px-6 pt-3 border-b border-slate-200 flex items-center justify-between gap-3 flex-wrap bg-white">
                 <div className="flex items-center gap-2">
                   <button
@@ -1717,63 +1727,66 @@ const [newContentType, setNewContentType] = useState("");
                         : "border-transparent text-slate-500 hover:text-slate-800")
                     }
                   >
-                    Monitoring Konten & Siap Posting ({linkedOrders.length})
+                    Daftar Konten Akun ({linkedOrders.length})
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setTiktokDrawerTab("edit")}
-                    className={
-                      "px-3.5 py-2 text-xs font-semibold border-b-2 transition cursor-pointer " +
-                      (tiktokDrawerTab === "edit"
-                        ? "border-sky-600 text-sky-700"
-                        : "border-transparent text-slate-500 hover:text-slate-800")
-                    }
-                  >
-                    Edit Akun & Jenis Konten
-                  </button>
+                  {isBrandManager && (
+                    <button
+                      type="button"
+                      onClick={() => setTiktokDrawerTab("edit")}
+                      className={
+                        "px-3.5 py-2 text-xs font-semibold border-b-2 transition cursor-pointer " +
+                        (tiktokDrawerTab === "edit"
+                          ? "border-sky-600 text-sky-700"
+                          : "border-transparent text-slate-500 hover:text-slate-800")
+                      }
+                    >
+                      Edit Akun & Jenis Konten
+                    </button>
+                  )}
                 </div>
 
-                <button
-                  type="button"
-                  disabled={isDeletingTtAccount}
-                  onClick={handleDeleteTiktokAccount}
-                  className="mb-2 px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-semibold transition cursor-pointer disabled:opacity-50"
-                >
-                  {isDeletingTtAccount ? "Menghapus..." : "Hapus Akun"}
-                </button>
+                {isBrandManager && (
+                  <button
+                    type="button"
+                    disabled={isDeletingTtAccount}
+                    onClick={handleDeleteTiktokAccount}
+                    className="mb-2 px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-semibold transition cursor-pointer disabled:opacity-50"
+                  >
+                    {isDeletingTtAccount ? "Menghapus..." : "Hapus Akun"}
+                  </button>
+                )}
               </div>
 
-              {/* Body Konten */}
-              <div className="p-6 overflow-y-auto space-y-5 flex-1">
-                {tiktokDrawerTab === "monitoring" ? (
+              {/* Body */}
+              <div className="p-6 overflow-y-auto space-y-5 flex-1 bg-slate-50/40">
+                {tiktokDrawerTab === "monitoring" || !isBrandManager ? (
                   <>
-                    {/* Ringkasan Status Konten Akun */}
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                      <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-3.5">
+                      <div className="rounded-xl border border-emerald-200 bg-white p-3.5">
                         <div className="text-[11px] font-semibold text-emerald-700 uppercase">
                           Siap Posting
                         </div>
-                        <div className="text-2xl font-bold text-emerald-900 mt-0.5">
+                        <div className="text-2xl font-bold text-slate-900 mt-0.5">
                           {readyToPostList.length}
                         </div>
-                        <div className="text-[11px] text-emerald-700/80">
+                        <div className="text-[11px] text-slate-500">
                           Status "Selesai" & belum diposting
                         </div>
                       </div>
 
-                      <div className="rounded-xl border border-sky-200 bg-sky-50/70 p-3.5">
+                      <div className="rounded-xl border border-sky-200 bg-white p-3.5">
                         <div className="text-[11px] font-semibold text-sky-700 uppercase">
                           Sudah Diposting
                         </div>
-                        <div className="text-2xl font-bold text-sky-900 mt-0.5">
+                        <div className="text-2xl font-bold text-slate-900 mt-0.5">
                           {postedList.length}
                         </div>
-                        <div className="text-[11px] text-sky-700/80">
-                          Sudah diunggah ke TikTok
+                        <div className="text-[11px] text-slate-500">
+                          Sudah ditandai terposting di Detail Order
                         </div>
                       </div>
 
-                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5">
+                      <div className="rounded-xl border border-slate-200 bg-white p-3.5">
                         <div className="text-[11px] font-semibold text-slate-600 uppercase">
                           Dalam Produksi
                         </div>
@@ -1786,178 +1799,132 @@ const [newContentType, setNewContentType] = useState("");
                       </div>
                     </div>
 
-                    {/* Bagian Khusus Antrean Siap Posting + Tombol Posting */}
-                    <div className="rounded-2xl border border-emerald-200 bg-emerald-50/30 p-4 space-y-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <h4 className="text-sm font-bold text-slate-900">
-                          Antrean Siap Posting ({readyToPostList.length})
-                        </h4>
-                        <span className="text-[11px] text-slate-500">
-                          Klik "Posting" jika video sudah naik ke akun TikTok
-                        </span>
-                      </div>
+                    {/* Baris Cari ID Order, Judul Konten, atau Brand + Filter Status & Platform */}
+                    <div className="bg-white rounded-2xl border border-slate-200 p-4 flex flex-col md:flex-row items-stretch md:items-center gap-3">
+                      <input
+                        type="text"
+                        value={accountSearchQuery}
+                        onChange={(e) => setAccountSearchQuery(e.target.value)}
+                        placeholder="Cari ID order, judul konten, atau brand..."
+                        className="flex-1 px-3.5 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-sky-500"
+                      />
+                      <select
+                        value={accountStatusFilter}
+                        onChange={(e) => setAccountStatusFilter(e.target.value)}
+                        className="px-3.5 py-2 rounded-xl border border-slate-300 text-sm bg-white text-slate-700 focus:outline-none focus:border-sky-500"
+                      >
+                        <option value="Semua">Semua Status</option>
+                        {Object.keys(STATUS_CONFIG || {}).map((st) => (
+                          <option key={st} value={st}>
+                            {st}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        value={accountPlatformFilter}
+                        onChange={(e) => setAccountPlatformFilter(e.target.value)}
+                        className="px-3.5 py-2 rounded-xl border border-slate-300 text-sm bg-white text-slate-700 focus:outline-none focus:border-sky-500"
+                      >
+                        <option value="Semua">Semua Platform</option>
+                        {(PLATFORMS || ["TikTok", "Instagram Reels", "YouTube Shorts"]).map((pf) => (
+                          <option key={pf} value={pf}>
+                            {pf}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
 
-                      {readyToPostList.length === 0 ? (
-                        <p className="text-xs text-slate-500 py-2">
-                          Belum ada video berstatus "Selesai" yang menunggu diposting untuk akun ini.
-                        </p>
-                      ) : (
-                        <div className="space-y-2">
-                          {readyToPostList.map((ord) => (
+                    {/* Grid Kotak-Kotak (Card Grid) Daftar Konten Akun */}
+                    {filteredOrders.length === 0 ? (
+                      <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center text-xs text-slate-500">
+                        Belum ada konten order yang sesuai dengan filter pada akun ini.
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {filteredOrders.map((ord) => {
+                          const stCfg = STATUS_CONFIG[ord.status] || {
+                            label: ord.status || "Antrean",
+                            badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
+                            dotClass: "bg-slate-500",
+                          };
+                          const isReady = ord.status === "Selesai" && !ord.isPosted;
+                          const isPosted = ord.status === "Selesai" && Boolean(ord.isPosted);
+
+                          return (
                             <div
                               key={ord.docId || ord.id}
-                              className="bg-white rounded-xl border border-slate-200 px-4 py-3 flex items-center justify-between gap-3 flex-wrap"
+                              onClick={() => {
+                                setSelectedOrder(ord);
+                                setActiveTiktokAccountId(null);
+                              }}
+                              className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-sky-400 transition flex flex-col justify-between gap-4 cursor-pointer"
                             >
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <span className="text-[11px] font-mono font-semibold text-slate-500">
-                                    {ord.id}
+                              <div className="space-y-2.5">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="px-2.5 py-1 rounded-lg bg-sky-50 text-sky-700 text-[11px] font-bold truncate">
+                                    {ord.id} • {ord.brand || activeTiktokAccount.brandName}
                                   </span>
-                                  <span className="text-sm font-bold text-slate-900 truncate">
-                                    {ord.title}
+                                  <span
+                                    className={
+                                      "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border text-[11px] font-semibold shrink-0 " +
+                                      (isPosted
+                                        ? "bg-sky-50 text-sky-700 border-sky-200"
+                                        : isReady
+                                          ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                          : stCfg.badgeClass)
+                                    }
+                                  >
+                                    <span
+                                      className={
+                                        "w-1.5 h-1.5 rounded-full " +
+                                        (isPosted
+                                          ? "bg-sky-500"
+                                          : isReady
+                                            ? "bg-emerald-500"
+                                            : stCfg.dotClass || "bg-slate-500")
+                                      }
+                                    />
+                                    {isPosted ? "Sudah Diposting" : isReady ? "Siap Posting" : stCfg.label}
                                   </span>
-                                  {ord.contentType && (
-                                    <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 text-[11px] font-medium">
-                                      {ord.contentType}
-                                    </span>
-                                  )}
                                 </div>
-                                <div className="text-xs text-slate-500 mt-0.5">
-                                  Editor: {ord.assignedEditor || "Belum Ditentukan"} • Deadline:{" "}
-                                  {ord.deadline || "-"}
+
+                                <div>
+                                  <h4 className="font-bold text-sm text-slate-900 line-clamp-1">
+                                    {ord.title}
+                                  </h4>
+                                  <p className="text-xs text-slate-500 line-clamp-2 mt-0.5">
+                                    {ord.brief || ord.contentType || "-"}
+                                  </p>
                                 </div>
                               </div>
 
-                              <button
-                                type="button"
-                                disabled={postingOrderDocId === ord.docId}
-                                onClick={() => handleMarkOrderAsPosted(ord)}
-                                className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white text-xs font-bold transition cursor-pointer shrink-0"
-                              >
-                                {postingOrderDocId === ord.docId ? "Memproses..." : "Posting"}
-                              </button>
+                              <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2 text-xs">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span className="px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200/80 text-[11px] font-semibold truncate">
+                                    {ord.platform || "TikTok"} ({ord.aspectRatio || "9:16"})
+                                  </span>
+                                  <span className="text-[11px] text-slate-500 truncate">
+                                    {ord.deadline || "-"}
+                                  </span>
+                                </div>
+
+                                <span className="inline-flex items-center gap-0.5 text-xs font-bold text-sky-700 shrink-0">
+                                  <span>Detail</span>
+                                  <ChevronRight className="w-3.5 h-3.5" />
+                                </span>
+                              </div>
                             </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Monitoring Seluruh Konten di Akun Ini */}
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between gap-2 flex-wrap">
-                        <h4 className="text-sm font-bold text-slate-900">
-                          Daftar Konten Akun ({filteredOrders.length})
-                        </h4>
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          {["Semua", "Siap Posting", "Sudah Diposting", "Proses"].map((tabName) => (
-                            <button
-                              key={tabName}
-                              type="button"
-                              onClick={() => setTiktokContentFilter(tabName)}
-                              className={
-                                "px-2.5 py-1 rounded-lg text-xs font-semibold transition cursor-pointer " +
-                                (tiktokContentFilter === tabName
-                                  ? "bg-slate-900 text-white"
-                                  : "bg-slate-100 text-slate-600 hover:bg-slate-200")
-                              }
-                            >
-                              {tabName}
-                            </button>
-                          ))}
-                        </div>
+                          );
+                        })}
                       </div>
-
-                      {filteredOrders.length === 0 ? (
-                        <div className="rounded-xl border border-slate-200 p-6 text-center text-xs text-slate-500">
-                          Tidak ada konten yang cocok dengan filter ini.
-                        </div>
-                      ) : (
-                        <div className="overflow-x-auto rounded-xl border border-slate-200">
-                          <table className="w-full text-left border-collapse text-xs">
-                            <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
-                              <tr>
-                                <th className="py-2.5 px-3 font-semibold">Judul Konten</th>
-                                <th className="py-2.5 px-3 font-semibold">Jenis Konten</th>
-                                <th className="py-2.5 px-3 font-semibold">Editor</th>
-                                <th className="py-2.5 px-3 font-semibold">Deadline</th>
-                                <th className="py-2.5 px-3 font-semibold">Status</th>
-                                <th className="py-2.5 px-3 font-semibold text-right">Aksi</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-100">
-                              {filteredOrders.map((ord) => {
-                                const isReady = ord.status === "Selesai" && !ord.isPosted;
-                                const isDonePosted = ord.status === "Selesai" && Boolean(ord.isPosted);
-                                const stCfg = STATUS_CONFIG[ord.status] || {
-                                  label: ord.status || "Antrean",
-                                  badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
-                                };
-
-                                return (
-                                  <tr key={ord.docId || ord.id} className="hover:bg-slate-50/70">
-                                    <td className="py-2.5 px-3 font-semibold text-slate-900">
-                                      <div>{ord.title}</div>
-                                      <div className="text-[11px] font-mono text-slate-400">
-                                        {ord.id}
-                                      </div>
-                                    </td>
-                                    <td className="py-2.5 px-3 text-slate-600">
-                                      {ord.contentType || "-"}
-                                    </td>
-                                    <td className="py-2.5 px-3 text-slate-600">
-                                      {ord.assignedEditor || "Belum Ditentukan"}
-                                    </td>
-                                    <td className="py-2.5 px-3 text-slate-600">
-                                      {ord.deadline || "-"}
-                                    </td>
-                                    <td className="py-2.5 px-3">
-                                      {isDonePosted ? (
-                                        <span className="px-2 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200 font-semibold">
-                                          Sudah Diposting
-                                        </span>
-                                      ) : isReady ? (
-                                        <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
-                                          Siap Posting
-                                        </span>
-                                      ) : (
-                                        <span
-                                          className={
-                                            "px-2 py-0.5 rounded-full border font-semibold " +
-                                            stCfg.badgeClass
-                                          }
-                                        >
-                                          {stCfg.label}
-                                        </span>
-                                      )}
-                                    </td>
-                                    <td className="py-2.5 px-3 text-right">
-                                      {isReady ? (
-                                        <button
-                                          type="button"
-                                          disabled={postingOrderDocId === ord.docId}
-                                          onClick={() => handleMarkOrderAsPosted(ord)}
-                                          className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold transition cursor-pointer"
-                                        >
-                                          Posting
-                                        </button>
-                                      ) : (
-                                        <span className="text-[11px] text-slate-400">
-                                          {isDonePosted ? "Selesai tayang" : "-"}
-                                        </span>
-                                      )}
-                                    </td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
-                      )}
-                    </div>
+                    )}
                   </>
                 ) : (
-                  /* Tab Edit Akun & Jenis Konten */
-                  <form onSubmit={handleUpdateTiktokAccountDetail} className="space-y-4">
+                  /* Tab Edit Akun & Jenis Konten (Khusus Brand Manager) */
+                  <form
+                    onSubmit={handleUpdateTiktokAccountDetail}
+                    className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4"
+                  >
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div>
                         <label className="block text-xs font-semibold text-slate-700 mb-1">
@@ -2064,7 +2031,7 @@ const [newContentType, setNewContentType] = useState("");
         );
       })()}
 
-            {isAddTiktokModalOpen && (
+      {isAddTiktokModalOpen && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-md w-full p-6 shadow-xl space-y-4">
             <div className="flex items-center justify-between">
