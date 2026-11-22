@@ -1,73 +1,82 @@
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed. Use POST." });
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const token = process.env.FONNTE_TOKEN;
-  if (!token) {
-    return res.status(500).json({ ok: false, error: "FONNTE_TOKEN belum diatur di Environment Variables Vercel." });
-  }
+  const token = process.env.WHATSAPP_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
 
-  const { event, message, recipients } = req.body || {};
-  if (!message || !Array.isArray(recipients) || recipients.length === 0) {
-    return res.status(400).json({ ok: false, error: "Payload harus menyertakan message dan recipients (array)." });
-  }
-
-  // Normalisasi nomor WA ke format internasional tanpa '+' (contoh: 6281234567890)
-  const normalizedTargets = recipients
-    .map((item) => {
-      if (typeof item === "string" || typeof item === "number") return String(item);
-      if (item && typeof item === "object") return String(item.phone || item.whatsapp || item.target || "");
-      return "";
-    })
-    .map((num) => num.replace(/[^\d]/g, ""))
-    .map((digits) => {
-      if (digits.startsWith("0")) return "62" + digits.slice(1);
-      if (digits.startsWith("8")) return "62" + digits;
-      return digits;
-    })
-    .filter((digits) => digits.length >= 9);
-
-  if (normalizedTargets.length === 0) {
-    return res.status(400).json({ ok: false, error: "Tidak ada nomor WhatsApp penerima yang valid." });
+  if (!token || !phoneNumberId) {
+    return res.status(500).json({
+      error: "WHATSAPP_TOKEN atau WHATSAPP_PHONE_NUMBER_ID belum diatur di Vercel.",
+    });
   }
 
   try {
-    const results = await Promise.all(
-      normalizedTargets.map(async (target) => {
-        const formData = new URLSearchParams();
-        formData.append("target", target);
-        formData.append("message", message);
-        formData.append("countryCode", "62");
+    const { to, templateName, languageCode = "id", variables = [] } = req.body || {};
 
-        const response = await fetch("https://api.fonnte.com/send", {
-          method: "POST",
-          headers: {
-            Authorization: token,
-          },
-          body: formData,
-        });
+    const cleanPhone = String(to || "")
+      .replace(/\D/g, "")
+      .replace(/^0/, "62");
 
-        const data = await response.json().catch(() => ({}));
-        return {
-          target,
-          status: response.ok ? "sent" : "failed",
-          gatewayResponse: data,
-        };
-      })
+    if (!cleanPhone || !templateName) {
+      return res.status(400).json({
+        error: "Nomor tujuan (to) dan nama template (templateName) wajib diisi.",
+      });
+    }
+
+    const payload = {
+      messaging_product: "whatsapp",
+      to: cleanPhone,
+      type: "template",
+      template: {
+        name: templateName,
+        language: { code: languageCode },
+        ...(Array.isArray(variables) && variables.length > 0
+          ? {
+              components: [
+                {
+                  type: "body",
+                  parameters: variables.map((val) => ({
+                    type: "text",
+                    text: String(val ?? ""),
+                  })),
+                },
+              ],
+            }
+          : {}),
+      },
+    };
+
+    const metaRes = await fetch(
+      `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      }
     );
 
-    const hasSuccess = results.some((r) => r.status === "sent");
-    return res.status(hasSuccess ? 200 : 502).json({
-      ok: hasSuccess,
-      event: event || "notification",
-      results,
+    const data = await metaRes.json();
+
+    if (!metaRes.ok) {
+      return res.status(metaRes.status).json({
+        error: data?.error?.message || "Gagal mengirim pesan ke Meta WhatsApp API",
+        details: data?.error || null,
+      });
+    }
+
+    return res.status(200).json({
+      ok: true,
+      messageId: data?.messages?.[0]?.id || null,
+      data,
     });
   } catch (err) {
     return res.status(500).json({
-      ok: false,
-      error: "Gagal menghubungi gateway WhatsApp.",
-      detail: err?.message || String(err),
+      error: err?.message || "Terjadi kesalahan internal saat menghubungi WhatsApp API",
     });
   }
 }
