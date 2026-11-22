@@ -88,31 +88,46 @@ function writeWaListForUser(prefix, user, list) {
 }
 
 function isWaLogForCurrentAccount(log, user) {
-  if (!log) return false;
-  const uid = String(user?.uid || user?.id || "").trim();
-  const email = String(user?.email || "").trim().toLowerCase();
-  const name = String(user?.name || user?.fullName || "").trim().toLowerCase();
-  const phoneDigits = String(user?.whatsapp || "").replace(/\D/g, "");
+  if (!log || !user) return false;
+  const norm = (v) => String(v || "").trim().toLowerCase().replace(/\s+/g, " ");
+  const userIds = new Set(
+    [user?.uid, user?.userId, user?.id, user?.docId]
+      .map((v) => String(v || "").trim())
+      .filter(Boolean)
+  );
+  const email = norm(user?.email);
+  const name = norm(user?.name || user?.fullName);
+  const phoneDigits = String(user?.whatsapp || user?.phone || "").replace(/\D/g, "");
 
-  const logOwnerUid = String(log?.ownerUid || "").trim();
-  const logOwnerEmail = String(log?.ownerEmail || "").trim().toLowerCase();
-  const logTargetUid = String(log?.targetUid || "").trim();
-  const logTargetEmail = String(log?.targetEmail || "").trim().toLowerCase();
-  const logTargetName = String(log?.targetName || "").trim().toLowerCase();
+  const logOwnerIds = new Set(
+    [log?.ownerUid, log?.ownerUserId, log?.ownerId]
+      .map((v) => String(v || "").trim())
+      .filter(Boolean)
+  );
+  const logOwnerEmail = norm(log?.ownerEmail);
+  const logTargetIds = [log?.targetUid, log?.targetUserId, log?.targetId]
+    .map((v) => String(v || "").trim())
+    .filter(Boolean);
+  const logTargetEmail = norm(log?.targetEmail);
+  const logTargetName = norm(log?.targetName);
   const logPhoneDigits = String(log?.phone || "").replace(/\D/g, "");
 
-  if (logTargetUid) return Boolean(uid && logTargetUid === uid);
-  if (logTargetEmail) return Boolean(email && logTargetEmail === email);
-  if (logOwnerUid || logOwnerEmail) {
-    return Boolean((uid && logOwnerUid === uid) || (email && logOwnerEmail === email));
-  }
-  if (logTargetName) {
-    if (name && logTargetName === name) return true;
-    if (email && logTargetName === email) return true;
-  }
-  if (logPhoneDigits && phoneDigits && logPhoneDigits === phoneDigits) {
+  const hasExplicitTarget = Boolean(logTargetIds.length > 0 || logTargetEmail || logTargetName || logPhoneDigits);
+
+  if (logTargetIds.some((id) => userIds.has(id))) return true;
+  if (email && logTargetEmail && logTargetEmail === email) return true;
+  if (name && logTargetName && logTargetName === name) {
     return true;
   }
+  if (email && logTargetName && logTargetName === email) return true;
+  if (phoneDigits && logPhoneDigits && phoneDigits === logPhoneDigits) return true;
+
+  // Jika target sudah ditentukan secara eksplisit tapi tidak cocok dengan user ini, jangan cocokkan ke owner
+  if (hasExplicitTarget) return false;
+
+  if ([...logOwnerIds].some((id) => userIds.has(id))) return true;
+  if (email && logOwnerEmail && logOwnerEmail === email) return true;
+
   return false;
 }
 
@@ -166,30 +181,40 @@ function resolveWaCanonicalAccountKey(userOrMember, allMembers = []) {
 
 function belongsToWaAccount(log, user) {
   if (!log || !user) return false;
-  const uid = String(user?.uid || user?.userId || user?.id || user?.docId || "").trim();
-  const email = String(user?.email || "").trim().toLowerCase();
-  const name = String(user?.name || user?.fullName || "").trim().toLowerCase();
+  const norm = (v) => String(v || "").trim().toLowerCase().replace(/\s+/g, " ");
+  const userIds = new Set(
+    [user?.uid, user?.userId, user?.id, user?.docId]
+      .map((v) => String(v || "").trim())
+      .filter(Boolean)
+  );
+  const email = norm(user?.email);
+  const name = norm(user?.name || user?.fullName);
 
-  const logTargetUid = String(log?.targetUid || "").trim();
-  const logTargetEmail = String(log?.targetEmail || "").trim().toLowerCase();
-  const logTargetName = String(log?.targetName || "").trim().toLowerCase();
+  const logTargetIds = [log?.targetUid, log?.targetUserId, log?.targetId]
+    .map((v) => String(v || "").trim())
+    .filter(Boolean);
+  const logTargetEmail = norm(log?.targetEmail);
+  const logTargetName = norm(log?.targetName);
   const logBucketKey = String(log?.recipientBucketKey || "").trim();
 
-  if (logBucketKey) {
-    const userBucketKey = resolveWaCanonicalAccountKey(user);
-    if (logBucketKey === userBucketKey) return true;
+  if (logTargetIds.some((id) => userIds.has(id))) return true;
+  if (email && logTargetEmail && logTargetEmail === email) return true;
+  if (name && logTargetName && logTargetName === name) {
+    return true;
   }
+  if (email && logTargetName && logTargetName === email) return true;
 
-  if (logTargetUid) {
-    return Boolean(uid && logTargetUid === uid);
-  }
-  if (logTargetEmail) {
-    return Boolean(email && logTargetEmail === email);
-  }
-  if (logTargetName) {
-    if (name && logTargetName === name) return true;
-    if (email && logTargetName === email) return true;
-    return false;
+  if (logBucketKey) {
+    const rawUserBucket = resolveWaCanonicalAccountKey(user);
+    const nameOnlyBucket = name ? encodeURIComponent(name) : "";
+    const emailOnlyBucket = email ? encodeURIComponent(email) : "";
+    if (
+      logBucketKey === rawUserBucket ||
+      (nameOnlyBucket && logBucketKey === nameOnlyBucket) ||
+      (emailOnlyBucket && logBucketKey === emailOnlyBucket)
+    ) {
+      return true;
+    }
   }
 
   return false;
@@ -494,11 +519,65 @@ function CreativeFlowApp() {
       return;
     }
     const scopedLogs = loadAccountWaStorage("cf_wa_logs", currentUser).filter((item) =>
-      belongsToWaAccount(item, currentUser)
+      belongsToWaAccount(item, currentUser) || isWaLogForCurrentAccount(item, currentUser)
     );
     const scopedReadIds = loadAccountWaStorage("cf_read_wa_logs", currentUser);
     setWaLogs(scopedLogs);
     setReadWaLogIds(scopedReadIds);
+
+    if (typeof onSnapshot !== "function" || typeof collection !== "function" || !db) {
+      return;
+    }
+
+    let unsubscribe = () => {};
+    try {
+      const logsQuery = typeof query === "function" && typeof orderBy === "function"
+        ? collection(db, "waLogs")
+        : collection(db, "waLogs");
+      unsubscribe = onSnapshot(
+        logsQuery,
+        (snapshot) => {
+          const remoteItems = [];
+          snapshot.forEach((docSnap) => {
+            const data = docSnap.data() || {};
+            const item = { id: data.id || docSnap.id, docId: docSnap.id, ...data };
+            if (data?.event === "Orderan Baru Masuk Antrean") {
+              console.debug("[CF_WA_DEBUG]", {
+                docId: docSnap.id,
+                itemTarget: { name: item.targetName, email: item.targetEmail, uid: item.targetUid, bucket: item.recipientBucketKey, ownerUid: item.ownerUid },
+                editorUser: { uid: currentUser?.uid, id: currentUser?.id, email: currentUser?.email, name: currentUser?.name, role: currentUser?.role },
+                belongs: belongsToWaAccount(item, currentUser),
+                isForCurrent: isWaLogForCurrentAccount(item, currentUser),
+              });
+            }
+            if (belongsToWaAccount(item, currentUser) || isWaLogForCurrentAccount(item, currentUser)) {
+              remoteItems.push(item);
+            }
+          });
+          remoteItems.sort((a, b) => (Number(b?.createdAtMs || b?.createdAt?.toMillis?.() || 0) - Number(a?.createdAtMs || a?.createdAt?.toMillis?.() || 0)));
+          const deduped = [];
+          const seen = new Set();
+          for (const item of remoteItems) {
+            const key = String(item?.id || item?.docId || "");
+            if (key && seen.has(key)) continue;
+            if (key) seen.add(key);
+            deduped.push(item);
+          }
+          const nextLogs = deduped.slice(0, 100);
+          setWaLogs(nextLogs);
+          saveAccountWaStorage("cf_wa_logs", currentUser, nextLogs);
+        },
+        (err) => {
+          console.warn("Sinkronisasi waLogs Firestore terganggu:", err?.message || err);
+        }
+      );
+    } catch (err) {
+      console.warn("Gagal memasang listener waLogs:", err?.message || err);
+    }
+
+    return () => {
+      if (typeof unsubscribe === "function") unsubscribe();
+    };
   }, [currentUser?.uid, currentUser?.id, currentUser?.email, currentUser?.name, currentUser?.role, currentUser?.whatsapp]);
 
   useEffect(() => {
@@ -795,19 +874,47 @@ const sanitizeContentTypes = (list) =>
         postedAtMs: Date.now(),
         postedAt: serverTimestamp(),
       });
-      const postedTarget = order.assignedEditor || order.creatorName || order.accountName || order.brand || currentUser?.name || "Tim";
-      await pushWaNotification({
-        event: "Konten Sudah Diposting",
-        targetName: postedTarget,
-        phone: resolveTeamWhatsApp(postedTarget),
-        message: formatWaOrderMessage({
-          recipientName: postedTarget,
-          order,
-          note: order.brief || "-",
-          statusLabel: "Terposting",
-          closing: "Konten sudah berhasil diposting ya. Terima kasih!",
-        }),
-      });
+      const postedRecipients = Array.from(
+        new Set(
+          [
+            order.assignedEditor || order.editorName || "",
+            order.creatorName || order.requestedBy || order.requestedByEmail || "",
+          ]
+            .map((v) => String(v || "").trim())
+            .filter(Boolean)
+        )
+      );
+      const finalPostedRecipients =
+        postedRecipients.length > 0
+          ? postedRecipients
+          : [order.accountName || order.brand || currentUser?.name || "Tim"];
+
+      for (const postedTarget of finalPostedRecipients) {
+        await pushWaNotification({
+          event: "Konten Sudah Diposting",
+          targetName: postedTarget,
+          targetEmail: (() => {
+            const pool = [...(Array.isArray(teamUsers) ? teamUsers : []), ...(Array.isArray(editors) ? editors : [])];
+            const q = String(postedTarget || "").trim().toLowerCase();
+            const found = pool.find((m) => m && ([m?.name, m?.fullName, m?.email].some((v) => String(v || "").trim().toLowerCase() === q)));
+            return String(found?.email || "").trim().toLowerCase();
+          })(),
+          targetUid: (() => {
+            const pool = [...(Array.isArray(teamUsers) ? teamUsers : []), ...(Array.isArray(editors) ? editors : [])];
+            const q = String(postedTarget || "").trim().toLowerCase();
+            const found = pool.find((m) => m && ([m?.name, m?.fullName, m?.email].some((v) => String(v || "").trim().toLowerCase() === q)));
+            return String(found?.uid || found?.userId || found?.id || found?.docId || "").trim();
+          })(),
+          phone: resolveTeamWhatsApp(postedTarget),
+          message: formatWaOrderMessage({
+            recipientName: postedTarget,
+            order,
+            note: order.brief || "-",
+            statusLabel: "Terposting",
+            closing: "Konten sudah berhasil diposting ya. Terima kasih!",
+          }),
+        });
+      }
     } catch (err) {
       console.error("Gagal menandai konten sebagai sudah diposting:", err);
     } finally {
@@ -834,6 +941,26 @@ const sanitizeContentTypes = (list) =>
         closing: "Mantap, orderannya sudah dinyatakan siap posting ya. Terima kasih atas proses editnya!",
       }),
     });
+
+    const bmTarget = String(
+      selectedOrder.creatorName || selectedOrder.requestedBy || selectedOrder.requestedByEmail || ""
+    ).trim();
+    if (bmTarget) {
+      await pushWaNotification({
+        event: "Order Selesai Dikerjakan",
+        targetName: bmTarget,
+        targetEmail: selectedOrder.requestedByEmail || "",
+        targetUid: selectedOrder.requestedByUid || "",
+        phone: resolveTeamWhatsApp(bmTarget),
+        message: formatWaOrderMessage({
+          recipientName: bmTarget,
+          order: selectedOrder,
+          note: selectedOrder.brief || selectedOrder.editorVideoUrl || "-",
+          statusLabel: "Selesai Dikerjakan",
+          closing: "Order video sudah selesai dikerjakan ya. Silakan dicek hasilnya!",
+        }),
+      });
+    }
   };
 
   const handleSaveMyWhatsApp = async (e) => {
@@ -853,6 +980,62 @@ const sanitizeContentTypes = (list) =>
     });
   };
 
+  const resolveTeamWhatsApp = (queryValue) => {
+    const rawQuery = String(queryValue || "").trim();
+    if (!rawQuery) return "";
+    const qLower = rawQuery.toLowerCase().replace(/\s+/g, " ");
+    const qDigits = rawQuery.replace(/\D+/g, "");
+    const pool = [
+      ...(Array.isArray(teamUsers) ? teamUsers : []),
+      ...(Array.isArray(editors) ? editors : []),
+    ].filter(Boolean);
+
+    const matched =
+      pool.find((m) => {
+        const ids = [m?.uid, m?.userId, m?.id, m?.docId]
+          .map((v) => String(v || "").trim())
+          .filter(Boolean);
+        if (ids.includes(rawQuery)) return true;
+
+        const email = String(m?.email || "").trim().toLowerCase();
+        if (email && email === qLower) return true;
+
+        const name = String(m?.name || m?.fullName || "").trim().toLowerCase().replace(/\s+/g, " ");
+        if (name && name === qLower) return true;
+
+        const memberDigits = String(m?.whatsapp || m?.phone || "").replace(/\D+/g, "");
+        if (qDigits && memberDigits && memberDigits === qDigits) return true;
+
+        return false;
+      }) || null;
+
+    const rawPhone = matched ? (matched.whatsapp || matched.phone || "") : rawQuery;
+    if (typeof normalizeWhatsApp === "function") {
+      return normalizeWhatsApp(rawPhone);
+    }
+    return String(rawPhone || "").replace(/[^\d+]/g, "");
+  };
+
+  const formatWaOrderMessage = ({ recipientName, order, note, statusLabel, closing } = {}) => {
+    const safeName = String(recipientName || "Tim").trim();
+    const orderId = String(order?.id || order?.docId || "-").trim();
+    const orderTitle = String(order?.title || order?.baseTitle || "-").trim();
+    const accountLabel = String(order?.brand || order?.accountName || "").trim();
+    const accountPart = accountLabel ? ` (${accountLabel})` : "";
+    const safeNote = String(note || order?.brief || "-").trim() || "-";
+    const safeStatus = String(statusLabel || order?.status || "Update").trim();
+    const safeClosing = String(closing || "").trim();
+
+    return [
+      `Hai ${safeName}, Orderan dengan nama: ${orderId} - ${orderTitle}${accountPart}`,
+      `Catatan order: ${safeNote}`,
+      `Status orderan: ${safeStatus}`,
+      safeClosing,
+    ]
+      .filter(Boolean)
+      .join(" ");
+  };
+
   const pushWaNotification = async ({ event, targetName, targetEmail, targetUid, phone, message }) => {
     const memberPool = [
       ...(Array.isArray(teamUsers) ? teamUsers : []),
@@ -863,17 +1046,35 @@ const sanitizeContentTypes = (list) =>
     const rawTargetEmail = String(targetEmail || "").trim().toLowerCase();
     const rawTargetUid = String(targetUid || "").trim();
 
+    const normKey = (v) => String(v || "").trim().toLowerCase().replace(/\s+/g, " ");
+    const targetIds = new Set(
+      [rawTargetUid, currentUser?.uid, currentUser?.id]
+        .map((v) => String(v || "").trim())
+        .filter((v) => v && v === rawTargetUid)
+    );
+
     const matchedRecipient = memberPool.find((m) => {
       if (!m) return false;
-      const mUid = String(m?.uid || m?.userId || m?.id || m?.docId || "").trim();
-      const mEmail = String(m?.email || "").trim().toLowerCase();
-      const mName = String(m?.name || m?.fullName || "").trim().toLowerCase();
-      if (rawTargetUid && mUid && rawTargetUid === mUid) return true;
+      const mIds = [m?.uid, m?.userId, m?.id, m?.docId].map((v) => String(v || "").trim()).filter(Boolean);
+      const mEmail = normKey(m?.email);
+      const mName = normKey(m?.name || m?.fullName);
+      const qName = normKey(rawTargetName);
+      if (rawTargetUid && mIds.includes(rawTargetUid)) return true;
       if (rawTargetEmail && mEmail && rawTargetEmail === mEmail) return true;
-      if (rawTargetName && mName && rawTargetName.toLowerCase() === mName) return true;
-      if (rawTargetName && mEmail && rawTargetName.toLowerCase() === mEmail) return true;
+      if (qName && mName && qName === mName) return true;
+      if (qName && mEmail && qName === mEmail) return true;
       return false;
-    });
+    }) || (() => {
+      const qName = normKey(rawTargetName);
+      if (!qName) return null;
+      const nameParts = qName.split(" ").filter((p) => p.length >= 3);
+      if (nameParts.length === 0) return null;
+      return memberPool.find((m) => {
+        if (!m) return false;
+        const mName = normKey(m?.name || m?.fullName);
+        return mName && nameParts.every((part) => mName.includes(part));
+      }) || null;
+    })();
 
     const resolvedTargetName = String(
       matchedRecipient?.name || matchedRecipient?.fullName || rawTargetName || "Tim"
@@ -884,7 +1085,6 @@ const sanitizeContentTypes = (list) =>
     const resolvedTargetUid = String(
       matchedRecipient?.uid || matchedRecipient?.userId || matchedRecipient?.id || matchedRecipient?.docId || rawTargetUid || ""
     ).trim();
-
     const resolvedPhone = normalizeWhatsApp(
       phone || matchedRecipient?.whatsapp || matchedRecipient?.phone || ""
     );
@@ -919,6 +1119,27 @@ const sanitizeContentTypes = (list) =>
       createdAtMs: Date.now(),
     };
 
+    if (WA_CLOUD_API_ENABLED && typeof sendWhatsAppNotification === "function" && resolvedPhone) {
+      try {
+        await sendWhatsAppNotification({
+          phone: resolvedPhone,
+          templateName: WA_TEMPLATE_NAME,
+          languageCode: WA_TEMPLATE_LANG,
+          variables: Array.isArray(variables) && variables.length > 0
+            ? variables
+            : buildOrderWaVariables({
+                event: entry.event,
+                targetName: resolvedTargetName,
+                order: typeof order !== "undefined" ? order : null,
+                note: typeof note !== "undefined" ? note : "",
+                statusLabel: typeof statusLabel !== "undefined" ? statusLabel : entry.event,
+              }),
+        });
+      } catch (waErr) {
+        console.warn("Gagal kirim WA Cloud API (log tetap tersimpan):", waErr?.message || waErr);
+      }
+    }
+
     const targetStorageKey = `cf_wa_logs_${recipientBucketKey}`;
     try {
       const existingRaw = localStorage.getItem(targetStorageKey);
@@ -939,11 +1160,13 @@ const sanitizeContentTypes = (list) =>
 
     try {
       if (typeof addDoc === "function" && typeof collection === "function" && typeof db !== "undefined" && db) {
+        console.info("[CF_WA_WRITE] mengirim ke Firestore waLogs:", entry.event, entry.targetName);
         await addDoc(collection(db, "waLogs"), {
           ...entry,
           createdAt: typeof serverTimestamp === "function" ? serverTimestamp() : new Date().toISOString(),
         });
       }
+        console.info("[CF_WA_WRITE] sukses masuk waLogs:", entry.id, entry.event);
     } catch (err) {
       console.warn("Simpan log WA ke Firestore dilewati/gagal:", err?.message || err);
     }
@@ -1819,6 +2042,7 @@ const sanitizeContentTypes = (list) =>
   }, [matchedOrderTiktokAccount]);
 
   const handleCreateOrder = async (e) => {
+    console.info("[CF_SUBMIT] handleCreateOrder terpanggil", { newBrand, newTitle, windowLock: typeof window !== "undefined" ? window.__cfCreatingOrder : null });
     if (e && typeof e.preventDefault === "function") e.preventDefault();
     if (e && typeof e.stopPropagation === "function") e.stopPropagation();
     if (typeof window !== "undefined") {
@@ -1833,13 +2057,14 @@ const sanitizeContentTypes = (list) =>
     const cleanType = String(
       typeof newContentType !== "undefined" && newContentType
         ? newContentType
-        : ((Array.isArray(orderModalContentTypes) && orderModalContentTypes[0]) || "")
+        : ((Array.isArray(orderModalContentTypes) && orderModalContentTypes[0]) || ""),
+      "",
     ).trim();
     const cleanTitle = rawTitle || (cleanBrand ? cleanBrand + " - " + cleanType : "");
 
     if (!cleanBrand || !cleanTitle) {
       alert("Pilih akun TikTok terdaftar dan isi judul order terlebih dahulu.");
-      return;
+      releaseOrderLock(); return;
     }
 
     const rawCount = Number(typeof batchCount !== "undefined" ? batchCount : 1);
@@ -1886,6 +2111,7 @@ const sanitizeContentTypes = (list) =>
         if (typeof db !== "undefined" && typeof addDoc === "function" && typeof collection === "function") {
           const docRef = await addDoc(collection(db, "orders"), itemOrder);
           itemOrder.docId = docRef.id;
+          console.info("[CF_ORDER_SAVED] tersimpan ke Firestore orders:", docRef.id, itemOrder.id);
         }
         createdOrders.push(itemOrder);
       }
@@ -1895,42 +2121,75 @@ const sanitizeContentTypes = (list) =>
       if (typeof pushWaNotification === "function" && typeof formatWaOrderMessage === "function") {
         const specificEditor = String(newOrderItem.assignedEditor || "").trim();
         const orderNote = newOrderItem.brief || "-";
-        const editorRecipients = [];
+        const poolMembers = [
+          ...(Array.isArray(editors) ? editors : []),
+          ...(Array.isArray(teamUsers) ? teamUsers : []),
+        ].filter(Boolean);
 
-        if (specificEditor) {
-          editorRecipients.push(specificEditor);
-        } else {
-          const allEditorNames = Array.from(
-            new Set(
-              [
-                ...(Array.isArray(editors) ? editors : []),
-                ...(Array.isArray(teamUsers) ? teamUsers : []),
-              ]
-                .filter((m) => {
-                  if (!m) return false;
-                  const r = String(m?.role || "").trim().toLowerCase();
-                  return r.includes("editor");
+        const editorCandidates = specificEditor
+          ? poolMembers.filter((m) => {
+              const n = String(m?.name || m?.fullName || "").trim().toLowerCase();
+              const e = String(m?.email || "").trim().toLowerCase();
+              const u = String(m?.uid || m?.userId || m?.id || m?.docId || "").trim();
+              const q = String(specificEditor || "").trim();
+              return n === q.toLowerCase() || e === q.toLowerCase() || u === q;
+            })
+          : poolMembers.filter((m) => String(m?.role || "").trim().toLowerCase().includes("editor"));
+
+        const rawEditorRecipients = editorCandidates.length > 0
+          ? editorCandidates.map((m) => ({
+              name: String(m?.name || m?.fullName || m?.email || specificEditor || "Video Editor").trim(),
+              email: String(m?.email || "").trim().toLowerCase(),
+              uid: String(m?.uid || m?.userId || m?.id || m?.docId || "").trim(),
+              phone: String(m?.whatsapp || m?.phone || "").trim(),
+            }))
+          : [{
+              name: String(specificEditor || "Khaedar Nasik").trim(),
+              email: "",
+              uid: "",
+              phone: "",
+            }];
+
+        const seenEditorKeys = new Set();
+        const editorRecipients = rawEditorRecipients.filter((rec) => {
+          const normPhone = typeof normalizeWhatsApp === "function"
+            ? normalizeWhatsApp(rec.phone || (typeof resolveTeamWhatsApp === "function" ? resolveTeamWhatsApp(rec.name) : ""))
+            : String(rec.phone || "").replace(/\D+/g, "");
+          const keys = [
+            rec.uid ? `uid:${rec.uid}` : "",
+            rec.email ? `email:${rec.email}` : "",
+            normPhone ? `phone:${normPhone}` : "",
+            rec.name ? `name:${rec.name.toLowerCase().replace(/\s+/g, " ")}` : "",
+          ].filter(Boolean);
+          if (keys.length === 0) return false;
+          if (keys.some((k) => seenEditorKeys.has(k))) return false;
+          keys.forEach((k) => seenEditorKeys.add(k));
+          return true;
+        });
+
+        console.info("[CF_WA_DEBUG] editorRecipients order baru:", { orderId: newOrderItem.id, specificEditor, editorRecipients });
+        for (const edRec of editorRecipients) {
+          try {
+            const builtMsg = typeof formatWaOrderMessage === "function"
+              ? formatWaOrderMessage({
+                  recipientName: edRec.name,
+                  order: newOrderItem,
+                  note: orderNote,
+                  statusLabel: "Dalam Antrean",
+                  closing: "Ada orderan video baru dari Brand Manager yang masuk ke antrean ya. Silakan dicek detail dan brief-nya!",
                 })
-                .map((m) => String(m?.name || m?.fullName || m?.email || "").trim())
-                .filter(Boolean)
-            )
-          );
-          editorRecipients.push(...allEditorNames);
-        }
-
-        for (const edRecipient of editorRecipients) {
-          await pushWaNotification({
-            event: "Orderan Baru Masuk Antrean",
-            targetName: edRecipient,
-            phone: typeof resolveTeamWhatsApp === "function" ? resolveTeamWhatsApp(edRecipient) : "",
-            message: formatWaOrderMessage({
-              recipientName: edRecipient,
-              order: newOrderItem,
-              note: orderNote,
-              statusLabel: "Dalam Antrean",
-              closing: "Ada orderan video baru dari Brand Manager yang masuk ke antrean ya. Silakan dicek detail dan brief-nya!",
-            }),
-          });
+              : `Orderan baru masuk antrean untuk ${edRec.name}: ${newOrderItem.title || newOrderItem.id}`;
+            await pushWaNotification({
+              event: "Orderan Baru Masuk Antrean",
+              targetName: edRec.name,
+              targetEmail: edRec.email,
+              targetUid: edRec.uid,
+              phone: edRec.phone || (typeof resolveTeamWhatsApp === "function" ? resolveTeamWhatsApp(edRec.name) : ""),
+              message: builtMsg,
+            });
+          } catch (notifErr) {
+            console.warn("Gagal mengirim notif order baru ke editor:", notifErr?.message || notifErr);
+          }
         }
       }
       if (typeof setNewTitle === "function") setNewTitle("");
@@ -1941,7 +2200,7 @@ const sanitizeContentTypes = (list) =>
       if (typeof setNewReferenceUrl === "function") setNewReferenceUrl("");
       if (typeof setIsNewOrderOpen === "function") setIsNewOrderOpen(false);
     } catch (err) {
-      console.error("Gagal mengirim order video:", err);
+      console.error("[CF_ORDER_ERR] Gagal mengirim order video:", { code: err?.code, message: err?.message, err });
       alert(err?.message || "Gagal mengirim order video.");
     } finally {
       releaseOrderLock();
@@ -2060,29 +2319,40 @@ const sanitizeContentTypes = (list) =>
       });
     }
     if (typeof pushWaNotification === "function") {
-      const bmRecipient = target.requestedBy || target.creatorName || target.requestedByEmail || "";
-      const editorActor = String(currentUser?.name || currentUser?.email || target.assignedEditor || "Video Editor").trim();
+      const bmRecipient = String(
+        target?.requestedBy ||
+        target?.creatorName ||
+        target?.requestedByEmail ||
+        target?.createdBy ||
+        ""
+      ).trim();
+      const bmEmail = String(target?.requestedByEmail || target?.creatorEmail || "").trim().toLowerCase();
+      const bmUid = String(target?.requestedByUid || target?.creatorUid || "").trim();
+      const editorActor = String(currentUser?.name || currentUser?.email || target?.assignedEditor || "Video Editor").trim();
       const wasRevision =
         String(target?.status || "").trim() === "Revisi" ||
         Boolean(String(target?.revisionNote || "").trim());
-      if (bmRecipient) {
+      if (bmRecipient || bmEmail || bmUid) {
+        const safeBmName = bmRecipient || bmEmail || "Brand Manager";
         const orderCode = target?.id ? `${target.id} - ` : "";
         const orderTitle = target?.title || "Untitled Order";
         await pushWaNotification({
           event: wasRevision ? "Orderan Sudah Direvisi" : "Editan Selesai & Siap Review",
-          targetName: bmRecipient,
-          targetEmail: target.requestedByEmail || "",
-          targetUid: target.requestedByUid || "",
-          phone: typeof resolveTeamWhatsApp === "function" ? resolveTeamWhatsApp(bmRecipient) : "",
+          targetName: safeBmName,
+          targetEmail: bmEmail,
+          targetUid: bmUid,
+          phone: typeof resolveTeamWhatsApp === "function"
+            ? resolveTeamWhatsApp(bmEmail || bmUid || safeBmName)
+            : "",
           message: [
             wasRevision
-              ? `Halo ${bmRecipient}, hasil revisi untuk orderan ${orderCode}${orderTitle} sudah selesai dikerjakan oleh ${editorActor}.`
-              : `Halo ${bmRecipient}, editan untuk orderan ${orderCode}${orderTitle} sudah selesai dikerjakan oleh ${editorActor} dan siap review.`,
-            `Status: Review`,
+              ? `Halo ${safeBmName}, hasil revisi untuk orderan ${orderCode}${orderTitle} sudah selesai dikerjakan oleh ${editorActor}.`
+              : `Halo ${safeBmName}, editan untuk orderan ${orderCode}${orderTitle} sudah selesai dikerjakan oleh ${editorActor} dan siap review.`,
+            "Status: Review",
             `Link Video: ${cleanUrl}`,
             wasRevision
-              ? `Perbaikan revisinya sudah dikirim ulang ya, silakan dicek kembali.`
-              : `Hasil edit sudah dikirim dan siap untuk di-review ya.`,
+              ? "Perbaikan revisinya sudah dikirim ulang ya, silakan dicek kembali."
+              : "Hasil edit sudah dikirim dan siap untuk di-review ya.",
           ].join("\n"),
         });
       }
@@ -3601,45 +3871,47 @@ const sanitizeContentTypes = (list) =>
                             });
                           }
                           if (currentOrderSnapshot && typeof pushWaNotification === "function") {
-                            const editorTarget = currentOrderSnapshot.assignedEditor || "Video Editor";
-                            const bmTarget = currentOrderSnapshot.creatorName || currentUser?.name || "Brand Management";
-                            const buildFourLines = (recipientName, statusLabel, closing) => {
-                              const orderCode = currentOrderSnapshot?.id ? `${currentOrderSnapshot.id} - ` : "";
-                              const orderTitle = currentOrderSnapshot?.title || "Untitled Order";
-                              const accountLabel =
-                                currentOrderSnapshot?.accountName || currentOrderSnapshot?.brand
-                                  ? ` (${currentOrderSnapshot?.accountName || currentOrderSnapshot?.brand})`
-                                  : "";
-                              return [
-                                `Hai ${recipientName || "Tim"},`,
-                                `Orderan dengan nama: ${orderCode}${orderTitle}${accountLabel}`,
-                                `Catatan order: ${cleanNote}`,
-                                `Status orderan: ${statusLabel}`,
-                                "",
-                                closing,
-                              ].join("\n");
-                            };
+                            const editorTarget = String(
+                              currentOrderSnapshot.assignedEditor ||
+                              currentOrderSnapshot.editorName ||
+                              currentOrderSnapshot.submittedBy ||
+                              currentOrderSnapshot.claimedBy ||
+                              "Video Editor"
+                            ).trim();
+                            const editorEmail = String(
+                              currentOrderSnapshot.assignedEditorEmail ||
+                              currentOrderSnapshot.claimedByEmail ||
+                              ""
+                            ).trim();
+                            const editorUid = String(
+                              currentOrderSnapshot.assignedEditorUid ||
+                              currentOrderSnapshot.claimedByUid ||
+                              ""
+                            ).trim();
+                            const orderCode = currentOrderSnapshot?.id ? `${currentOrderSnapshot.id} - ` : "";
+                            const orderTitle = currentOrderSnapshot?.title || "Untitled Order";
+                            const accountLabel =
+                              currentOrderSnapshot?.accountName || currentOrderSnapshot?.brand
+                                ? ` (${currentOrderSnapshot?.accountName || currentOrderSnapshot?.brand})`
+                                : "";
+                            const revisionMessage = [
+                              `Hai ${editorTarget || "Tim"},`,
+                              `Orderan dengan nama: ${orderCode}${orderTitle}${accountLabel}`,
+                              `Catatan order: ${cleanNote}`,
+                              "Status orderan: Revisi",
+                              "",
+                              "Ada catatan revisi nih, silakan dicek dan disesuaikan ya biar bisa segera lanjut ke tahap berikutnya.",
+                            ].join("\n");
 
                             await pushWaNotification({
                               event: "Revisi",
                               targetName: editorTarget,
-                              phone: typeof resolveTeamWhatsApp === "function" ? resolveTeamWhatsApp(editorTarget) : (currentUser?.whatsapp || ""),
-                              message: buildFourLines(
-                                editorTarget,
-                                "Revisi",
-                                "Ada catatan revisi nih, silakan dicek dan disesuaikan ya biar bisa segera lanjut ke tahap berikutnya."
-                              ),
-                            });
-
-                            await pushWaNotification({
-                              event: "Orderan Sudah Direvisi / Review",
-                              targetName: bmTarget,
-                              phone: typeof resolveTeamWhatsApp === "function" ? resolveTeamWhatsApp(bmTarget) : (currentUser?.whatsapp || ""),
-                              message: buildFourLines(
-                                bmTarget,
-                                "Direvisi / Review",
-                                "Perbaikan revisinya sudah selesai dikerjakan dan siap untuk di-review ulang ya. Silakan dicek kembali!"
-                              ),
+                              targetEmail: editorEmail,
+                              targetUid: editorUid,
+                              phone: typeof resolveTeamWhatsApp === "function"
+                                ? resolveTeamWhatsApp(editorTarget)
+                                : "",
+                              message: revisionMessage,
                             });
                           }
                           if (typeof setShowRevisionInput === "function") setShowRevisionInput(false);
@@ -4313,6 +4585,26 @@ async function sendWhatsAppNotification({
   }
 
   return data;
+}
+
+
+const WA_CLOUD_API_ENABLED = false; // Ubah ke true saat siap kirim nyata lewat /api/send-wa
+const WA_TEMPLATE_NAME = "update_order_creativeflow"; // Ganti sesuai nama template Aktif di Meta
+const WA_TEMPLATE_LANG = "id";
+
+function buildOrderWaVariables({ event, targetName, order, note, statusLabel }) {
+  const recipient = String(targetName || "Tim").trim() || "Tim";
+  const title = String(order?.title || "Untitled Order").trim() || "Untitled Order";
+  const codeId = String(order?.id || "").trim();
+  const orderLabel = codeId ? `${codeId} - ${title}` : title;
+  const stageAndNote = [
+    statusLabel || event || "Update Order",
+    String(note || order?.brief || "").trim(),
+  ]
+    .filter(Boolean)
+    .join(" | ");
+
+  return [recipient, orderLabel, stageAndNote];
 }
 
 export default function App() {
