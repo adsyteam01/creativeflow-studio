@@ -4286,6 +4286,35 @@ const sanitizeContentTypes = (list) =>
   );
 }
 
+async function sendWhatsAppNotification({
+  phone,
+  templateName,
+  languageCode = "id",
+  variables = [],
+}) {
+  if (!phone) {
+    throw new Error("Nomor WhatsApp tujuan kosong.");
+  }
+
+  const res = await fetch("/api/send-wa", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      to: phone,
+      templateName,
+      languageCode,
+      variables,
+    }),
+  });
+
+  const data = await res.json();
+  if (!res.ok || !data?.ok) {
+    throw new Error(data?.error || "Gagal mengirim notifikasi WhatsApp");
+  }
+
+  return data;
+}
+
 export default function App() {
   return (
     <AppErrorBoundary>
