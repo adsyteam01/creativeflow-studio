@@ -790,46 +790,77 @@ const sanitizeContentTypes = (list) =>
       (item) => String(item?.accountName || "").toLowerCase() === cleanAccount.toLowerCase()
     );
 
+    setIsSavingTtEdit(true);
     const createdAtMs = existingAccount?.createdAtMs || Date.now();
-    const targetId = existingAccount?.id || ("tt_" + Date.now());
-    const hasFirestoreId = Boolean(existingAccount?.id && !String(existingAccount.id).startsWith("tt_"));
+    const existingDocId = String(existingAccount?.docId || "").trim();
+    const existingId = String(existingAccount?.id || "").trim();
+    const hasFirestoreId = Boolean(existingDocId || (existingId && !existingId.startsWith("tt_")));
+    const firestoreDocId = existingDocId || (hasFirestoreId ? existingId : "");
 
     const cleanLogo = (ttBrandLogo || "").trim();
-    const nextItem = {
-      id: targetId,
+    const actorUid = String(currentUser?.uid || currentUser?.userId || currentUser?.id || "").trim();
+    const actorName = String(currentUser?.name || currentUser?.fullName || currentUser?.email || "").trim();
+
+    const payload = {
       brandName: cleanBrand,
       accountName: cleanAccount,
       logoUrl: cleanLogo,
       brandLogo: cleanLogo,
-      contentTypes: cleanTypes,
+      contentTypes: sanitizeContentTypes(cleanTypes),
       createdAtMs,
+      updatedAtMs: Date.now(),
+      ...(existingAccount ? {} : { createdByUid: actorUid, createdByName: actorName }),
     };
 
-    setTiktokAccounts((prev) => {
-      const safe = Array.isArray(prev) ? prev : [];
-      const updated = existingAccount
-        ? safe.map((item) =>
-            item.id === targetId
-              ? {
-                  ...item,
-                  brandName: cleanBrand,
-                  accountName: cleanAccount,
-                  logoUrl: cleanLogo,
-                  brandLogo: cleanLogo,
-                  contentTypes: cleanTypes,
-                }
-              : item
-          )
-        : [nextItem, ...safe];
-      try {
-        localStorage.setItem("cf_tiktok_accounts", JSON.stringify(updated));
-      } catch {}
-      return updated;
-    });
     try {
-      setTiktokDrawerTab("monitoring");
+      let resolvedId = firestoreDocId || ("tt_" + Date.now());
+      let resolvedDocId = firestoreDocId || "";
+
+      if (db && typeof addDoc === "function" && typeof setDoc === "function" && typeof doc === "function" && typeof collection === "function") {
+        if (firestoreDocId) {
+          await setDoc(doc(db, "tiktokAccounts", firestoreDocId), { id: firestoreDocId, ...payload }, { merge: true });
+          resolvedId = firestoreDocId;
+          resolvedDocId = firestoreDocId;
+        } else {
+          const docRef = await addDoc(collection(db, "tiktokAccounts"), payload);
+          resolvedId = docRef.id;
+          resolvedDocId = docRef.id;
+          await setDoc(docRef, { id: docRef.id }, { merge: true });
+        }
+      }
+
+      const nextItem = {
+        ...(existingAccount || {}),
+        id: resolvedId,
+        docId: resolvedDocId || existingAccount?.docId,
+        ...payload,
+      };
+
+      setTiktokAccounts((prev) => {
+        const safe = Array.isArray(prev) ? prev : [];
+        const updated = existingAccount
+          ? safe.map((item) =>
+              item === existingAccount ||
+              (existingDocId && item?.docId === existingDocId) ||
+              (existingId && item?.id === existingId)
+                ? nextItem
+                : item
+            )
+          : [nextItem, ...safe];
+        try {
+          localStorage.setItem("cf_tiktok_accounts", JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+
+      if (typeof setIsAddTiktokModalOpen === "function") setIsAddTiktokModalOpen(false);
+      if (typeof setTtBrandName === "function") setTtBrandName("");
+      if (typeof setTtAccountName === "function") setTtAccountName("");
+      if (typeof setTtSelectedTypes === "function") setTtSelectedTypes([]);
+      if (typeof setTtBrandLogo === "function") setTtBrandLogo("");
+      if (typeof setTiktokDrawerTab === "function") setTiktokDrawerTab("monitoring");
     } catch (err) {
-      console.error("Gagal memperbarui detail akun TikTok:", err);
+      console.error("Gagal menyimpan akun TikTok ke Firestore:", err);
     } finally {
       setIsSavingTtEdit(false);
     }
@@ -1922,62 +1953,44 @@ const sanitizeContentTypes = (list) =>
           (snap) => {
             const firestoreRows = snap.docs.map((d) => {
               const data = d.data() || {};
+              const rawTypes = Array.isArray(data.contentTypes)
+                ? data.contentTypes
+                : Array.isArray(data.selectedTypes)
+                ? data.selectedTypes
+                : [];
               return {
+                ...data,
                 docId: d.id,
                 id: data.id || d.id,
                 brandName: data.brandName || data.brand || data.accountName || "",
                 accountName: data.accountName || data.brandName || d.id,
-                contentTypes: Array.isArray(data.contentTypes)
-                  ? data.contentTypes
-                  : Array.isArray(data.selectedTypes)
-                  ? data.selectedTypes
-                  : [],
-                ...data,
+                logoUrl: data.logoUrl || data.brandLogo || "",
+                brandLogo: data.brandLogo || data.logoUrl || "",
+                contentTypes: sanitizeContentTypes(rawTypes),
               };
             });
 
-            let localRows = [];
-            try {
-              const parsed = JSON.parse(localStorage.getItem("cf_tiktok_accounts") || "[]");
-              if (Array.isArray(parsed)) localRows = parsed;
-            } catch {}
-
-            setTiktokAccounts((prev) => {
-              const baseList = [
-                ...(Array.isArray(prev) ? prev : []),
-                ...localRows,
-              ];
-              const byKey = new Map();
-
-              for (const item of baseList) {
-                if (!item) continue;
-                const key = String(item.docId || item.id || item.accountName || "").toLowerCase();
-                if (!key) continue;
-                byKey.set(key, item);
-              }
-
-              for (const fItem of firestoreRows) {
-                const key = String(fItem.docId || fItem.id || fItem.accountName || "").toLowerCase();
-                const byHandle = String(fItem.accountName || "").toLowerCase();
-                if (byHandle) {
-                  for (const [existingKey, existingVal] of byKey.entries()) {
-                    if (String(existingVal?.accountName || "").toLowerCase() === byHandle) {
-                      byKey.delete(existingKey);
-                    }
+            const byKey = new Map();
+            for (const fItem of firestoreRows) {
+              if (!fItem) continue;
+              const key = String(fItem.docId || fItem.id || fItem.accountName || "").trim().toLowerCase();
+              if (!key) continue;
+              const byHandle = String(fItem.accountName || "").trim().toLowerCase();
+              if (byHandle) {
+                for (const [existingKey, existingVal] of byKey.entries()) {
+                  if (String(existingVal?.accountName || "").trim().toLowerCase() === byHandle) {
+                    byKey.delete(existingKey);
                   }
                 }
-                if (key) {
-                  const prevMatch = byKey.get(key) || {};
-                  byKey.set(key, { ...prevMatch, ...fItem });
-                }
               }
+              byKey.set(key, fItem);
+            }
 
-              const merged = Array.from(byKey.values());
-              try {
-                localStorage.setItem("cf_tiktok_accounts", JSON.stringify(merged));
-              } catch {}
-              return merged;
-            });
+            const synced = Array.from(byKey.values());
+            try {
+              localStorage.setItem("cf_tiktok_accounts", JSON.stringify(synced));
+            } catch {}
+            setTiktokAccounts(synced);
           },
           (err) => {
             console.error("Gagal memuat tiktokAccounts:", err);
