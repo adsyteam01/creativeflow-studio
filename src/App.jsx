@@ -838,15 +838,18 @@ const sanitizeContentTypes = (list) =>
 
       setTiktokAccounts((prev) => {
         const safe = Array.isArray(prev) ? prev : [];
-        const updated = existingAccount
-          ? safe.map((item) =>
-              item === existingAccount ||
-              (existingDocId && item?.docId === existingDocId) ||
-              (existingId && item?.id === existingId)
-                ? nextItem
-                : item
-            )
-          : [nextItem, ...safe];
+        const normHandle = cleanAccount.toLowerCase();
+        const withoutDupes = safe.filter((item) => {
+          if (!item) return false;
+          const itemDocId = String(item.docId || "").trim();
+          const itemId = String(item.id || "").trim();
+          const itemHandle = String(item.accountName || "").trim().toLowerCase();
+          const sameDoc = (resolvedDocId && itemDocId === resolvedDocId) || (existingDocId && itemDocId === existingDocId);
+          const sameId = (resolvedId && itemId === resolvedId) || (existingId && itemId === existingId);
+          const sameHandle = normHandle && itemHandle === normHandle;
+          return !(sameDoc || sameId || sameHandle);
+        });
+        const updated = [nextItem, ...withoutDupes];
         try {
           localStorage.setItem("cf_tiktok_accounts", JSON.stringify(updated));
         } catch {}
@@ -2963,7 +2966,7 @@ const sanitizeContentTypes = (list) =>
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {(Array.isArray(tiktokAccounts) ? tiktokAccounts : []).map((account) => {
+                {(Array.isArray(tiktokAccounts) ? tiktokAccounts : []).map((account, idx) => {
                   const accountOrders = (Array.isArray(orders) ? orders : []).filter((ord) =>
                     isOrderMatchedToTiktokAccount(ord, account)
                   );
@@ -2976,7 +2979,7 @@ const sanitizeContentTypes = (list) =>
 
                   return (
                     <div
-                      key={account.id}
+                      key={String(account.docId || account.id || account.accountName || idx) + "_" + idx}
                       className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs hover:border-slate-300 transition flex flex-col justify-between gap-4"
                     >
                       <div className="space-y-3">
