@@ -542,7 +542,7 @@ function CreativeFlowApp() {
             const data = docSnap.data() || {};
             const item = { id: data.id || docSnap.id, docId: docSnap.id, ...data };
             if (data?.event === "Orderan Baru Masuk Antrean") {
-              console.debug("[CF_WA_DEBUG]", {
+              if (import.meta.env.DEV) console.debug("[CF_WA_DEBUG]", {
                 docId: docSnap.id,
                 itemTarget: { name: item.targetName, email: item.targetEmail, uid: item.targetUid, bucket: item.recipientBucketKey, ownerUid: item.ownerUid },
                 editorUser: { uid: currentUser?.uid, id: currentUser?.id, email: currentUser?.email, name: currentUser?.name, role: currentUser?.role },
@@ -1153,7 +1153,8 @@ const sanitizeContentTypes = (list) =>
       createdAtMs: Date.now(),
     };
 
-    if (WA_CLOUD_API_ENABLED && typeof sendWhatsAppNotification === "function" && resolvedPhone) {
+    const isValidTargetPhone = /^62[1-9][0-9]{7,12}$/.test(String(resolvedPhone || ""));
+    if (WA_CLOUD_API_ENABLED && typeof sendWhatsAppNotification === "function" && isValidTargetPhone) {
       try {
         const explicitVars = typeof variables !== "undefined" && Array.isArray(variables) && variables.length > 0
           ? variables
@@ -1195,13 +1196,13 @@ const sanitizeContentTypes = (list) =>
 
     try {
       if (typeof addDoc === "function" && typeof collection === "function" && typeof db !== "undefined" && db) {
-        console.info("[CF_WA_WRITE] mengirim ke Firestore waLogs:", entry.event, entry.targetName);
+        if (import.meta.env.DEV) console.info("[CF_WA_WRITE] mengirim ke Firestore waLogs:", entry.event, entry.targetName);
         await addDoc(collection(db, "waLogs"), {
           ...entry,
           createdAt: typeof serverTimestamp === "function" ? serverTimestamp() : new Date().toISOString(),
         });
       }
-        console.info("[CF_WA_WRITE] sukses masuk waLogs:", entry.id, entry.event);
+        if (import.meta.env.DEV) console.info("[CF_WA_WRITE] sukses masuk waLogs:", entry.id, entry.event);
     } catch (err) {
       console.warn("Simpan log WA ke Firestore dilewati/gagal:", err?.message || err);
     }
@@ -2059,7 +2060,7 @@ const sanitizeContentTypes = (list) =>
   }, [matchedOrderTiktokAccount]);
 
   const handleCreateOrder = async (e) => {
-    console.info("[CF_SUBMIT] handleCreateOrder terpanggil", { newBrand, newTitle, windowLock: typeof window !== "undefined" ? window.__cfCreatingOrder : null });
+    if (import.meta.env.DEV) console.info("[CF_SUBMIT] handleCreateOrder terpanggil", { newBrand, newTitle, windowLock: typeof window !== "undefined" ? window.__cfCreatingOrder : null });
     if (e && typeof e.preventDefault === "function") e.preventDefault();
     if (e && typeof e.stopPropagation === "function") e.stopPropagation();
     if (typeof window !== "undefined") {
@@ -2128,7 +2129,7 @@ const sanitizeContentTypes = (list) =>
         if (typeof db !== "undefined" && typeof addDoc === "function" && typeof collection === "function") {
           const docRef = await addDoc(collection(db, "orders"), itemOrder);
           itemOrder.docId = docRef.id;
-          console.info("[CF_ORDER_SAVED] tersimpan ke Firestore orders:", docRef.id, itemOrder.id);
+          if (import.meta.env.DEV) console.info("[CF_ORDER_SAVED] tersimpan ke Firestore orders:", docRef.id, itemOrder.id);
         }
         createdOrders.push(itemOrder);
       }
@@ -2184,7 +2185,7 @@ const sanitizeContentTypes = (list) =>
           return true;
         });
 
-        console.info("[CF_WA_DEBUG] editorRecipients order baru:", { orderId: newOrderItem.id, specificEditor, editorRecipients });
+        if (import.meta.env.DEV) console.info("[CF_WA_DEBUG] editorRecipients order baru:", { orderId: newOrderItem.id, specificEditor, editorRecipients });
         for (const edRec of editorRecipients) {
           try {
             const builtMsg = typeof formatWaOrderMessage === "function"

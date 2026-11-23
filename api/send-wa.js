@@ -7,6 +7,11 @@ function sanitizeWaParam(val) {
   return cleaned || "-";
 }
 
+
+function isValidWaPhone(digits) {
+  return /^62[1-9][0-9]{7,12}$/.test(String(digits || ""));
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -31,6 +36,11 @@ export default async function handler(req, res) {
     if (!cleanPhone || !templateName) {
       return res.status(400).json({
         error: "Nomor tujuan (to) dan nama template (templateName) wajib diisi.",
+      });
+    }
+    if (!isValidWaPhone(cleanPhone)) {
+      return res.status(400).json({
+        error: "Format nomor WhatsApp tujuan tidak valid (gunakan format 628xxxxxxxxxx).",
       });
     }
 
