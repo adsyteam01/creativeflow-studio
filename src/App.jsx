@@ -1119,9 +1119,25 @@ const sanitizeContentTypes = (list) =>
     const resolvedTargetUid = String(
       matchedRecipient?.uid || matchedRecipient?.userId || matchedRecipient?.id || matchedRecipient?.docId || rawTargetUid || ""
     ).trim();
-    const resolvedPhone = normalizeWhatsApp(
-      phone || matchedRecipient?.whatsapp || matchedRecipient?.phone || ""
+    const isCurrentUserTarget = Boolean(
+      currentUser &&
+      ((resolvedTargetUid && [currentUser?.uid, currentUser?.userId, currentUser?.id, currentUser?.docId].map((x) => String(x || "").trim()).includes(resolvedTargetUid)) ||
+        (resolvedTargetEmail && String(currentUser?.email || "").trim().toLowerCase() === resolvedTargetEmail) ||
+        (resolvedTargetName && normKey(currentUser?.name || currentUser?.fullName) === normKey(resolvedTargetName)))
     );
+
+    const candidateRawPhone =
+      phone ||
+      extractRawWhatsAppField(matchedRecipient) ||
+      (typeof resolveTeamWhatsApp === "function"
+        ? resolveTeamWhatsApp(resolvedTargetEmail || resolvedTargetName)
+        : "") ||
+      (isCurrentUserTarget && typeof resolveCurrentUserWhatsApp === "function"
+        ? resolveCurrentUserWhatsApp(currentUser, memberPool)
+        : "") ||
+      "";
+
+    const resolvedPhone = normalizeWhatsApp(candidateRawPhone);
 
     const nowTime = new Date().toLocaleTimeString("id-ID", {
       hour: "2-digit",
