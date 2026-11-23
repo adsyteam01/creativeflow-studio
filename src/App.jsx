@@ -1155,19 +1155,20 @@ const sanitizeContentTypes = (list) =>
 
     if (WA_CLOUD_API_ENABLED && typeof sendWhatsAppNotification === "function" && resolvedPhone) {
       try {
+        const explicitVars = typeof variables !== "undefined" && Array.isArray(variables) && variables.length > 0
+          ? variables
+          : null;
         await sendWhatsAppNotification({
           phone: resolvedPhone,
           templateName: WA_TEMPLATE_NAME,
           languageCode: WA_TEMPLATE_LANG,
-          variables: Array.isArray(variables) && variables.length > 0
-            ? variables
-            : buildOrderWaVariables({
-                event: entry.event,
-                targetName: resolvedTargetName,
-                order: typeof order !== "undefined" ? order : null,
-                note: typeof note !== "undefined" ? note : "",
-                statusLabel: typeof statusLabel !== "undefined" ? statusLabel : entry.event,
-              }),
+          variables: explicitVars || buildOrderWaVariables({
+            event: entry.event,
+            targetName: resolvedTargetName,
+            order: typeof order !== "undefined" ? order : null,
+            note: typeof note !== "undefined" ? note : "",
+            statusLabel: typeof statusLabel !== "undefined" ? statusLabel : entry.event,
+          }),
         });
       } catch (waErr) {
         console.warn("Gagal kirim WA Cloud API (log tetap tersimpan):", waErr?.message || waErr);
