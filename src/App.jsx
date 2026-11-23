@@ -4609,17 +4609,28 @@ const WA_CLOUD_API_ENABLED = true; // Ubah ke true saat siap kirim nyata lewat /
 const WA_TEMPLATE_NAME = "update_order_creativeflow"; // Ganti sesuai nama template Aktif di Meta
 const WA_TEMPLATE_LANG = "id";
 
+function cleanSingleLineWa(val, fallback = "-") {
+  const out = String(val ?? "")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return out || fallback;
+}
+
 function buildOrderWaVariables({ event, targetName, order, note, statusLabel }) {
-  const recipient = String(targetName || "Tim").trim() || "Tim";
-  const title = String(order?.title || "Untitled Order").trim() || "Untitled Order";
-  const codeId = String(order?.id || "").trim();
-  const orderLabel = codeId ? `${codeId} - ${title}` : title;
-  const stageAndNote = [
-    statusLabel || event || "Update Order",
-    String(note || order?.brief || "").trim(),
-  ]
-    .filter(Boolean)
-    .join(" | ");
+  const recipient = cleanSingleLineWa(targetName, "Tim");
+  const title = cleanSingleLineWa(order?.title, "Untitled Order");
+  const codeId = cleanSingleLineWa(order?.id, "");
+  const orderLabel = cleanSingleLineWa(codeId ? `${codeId} - ${title}` : title, "Order");
+  const stageAndNote = cleanSingleLineWa(
+    [
+      statusLabel || event || "Update Order",
+      note || order?.brief || "",
+    ]
+      .filter(Boolean)
+      .join(" - "),
+    "Update Order"
+  );
 
   return [recipient, orderLabel, stageAndNote];
 }
