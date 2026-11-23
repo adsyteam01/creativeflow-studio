@@ -4604,7 +4604,7 @@ async function sendWhatsAppNotification({
 }
 
 
-const WA_CLOUD_API_ENABLED = false; // Ubah ke true saat siap kirim nyata lewat /api/send-wa
+const WA_CLOUD_API_ENABLED = true; // Ubah ke true saat siap kirim nyata lewat /api/send-wa
 const WA_TEMPLATE_NAME = "update_order_creativeflow"; // Ganti sesuai nama template Aktif di Meta
 const WA_TEMPLATE_LANG = "id";
 
