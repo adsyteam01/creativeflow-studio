@@ -1335,7 +1335,7 @@ function CreativeFlowApp() {
       (Array.isArray(tiktokAccounts) ? tiktokAccounts.flatMap((a) => a?.contentTypes || []) : []);
     const cleaned = typeof sanitizeContentTypes === "function" ? sanitizeContentTypes(raw) : raw;
     const unique = Array.from(new Set((Array.isArray(cleaned) ? cleaned : []).filter(Boolean)));
-    return unique.length > 0 ? unique : ["UGC", "Review", "Edukasi", "Hard Selling"];
+    return unique.length > 0 ? unique : (Array.isArray(TIKTOK_CONTENT_TYPES) ? TIKTOK_CONTENT_TYPES : []);
   }, [activeTiktokAccount, editTtSelectedTypes, tiktokAccounts]);
 
     const mainFilteredOrders = useMemo(() => {
@@ -4192,7 +4192,7 @@ function CreativeFlowApp() {
                   Pilihan Jenis Konten (Bisa pilih lebih dari 1) <span className="text-rose-600">*</span>
                 </label>
                 <div className="space-y-1.5 max-h-52 overflow-y-auto p-2.5 rounded-xl border border-slate-200 bg-slate-50/70">
-                  {Array.from(new Set([...(Array.isArray(TIKTOK_CONTENT_TYPES) ? TIKTOK_CONTENT_TYPES : []), ...(Array.isArray(brandManagerContentTypes) ? brandManagerContentTypes : [])])).map((ct) => {
+                  {sanitizeContentTypes([...(Array.isArray(tiktokAccounts) ? tiktokAccounts.flatMap((acc) => acc?.contentTypes || []) : []), ...(Array.isArray(brandManagerContentTypes) ? brandManagerContentTypes : []), ...(Array.isArray(TIKTOK_CONTENT_TYPES) ? TIKTOK_CONTENT_TYPES : [])]).map((ct) => {
                     const checked = ttSelectedTypes.includes(ct);
                     return (
                       <label key={ct} className="flex items-center gap-2 text-xs text-slate-800 cursor-pointer py-0.5">
