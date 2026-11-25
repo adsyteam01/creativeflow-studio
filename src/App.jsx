@@ -2783,11 +2783,7 @@ function CreativeFlowApp() {
                       stLow === "sudah diupload" ||
                       stLow === "sudah di-upload" ||
                       stLow === "terposting";
-                    const ready =
-                      stLow === "selesai" ||
-                      stLow === "siap posting" ||
-                      stLow === "kurasi bm" ||
-                      stLow === "review";
+                    const ready = stLow === "selesai" || stLow === "siap posting";
                     return posted || ready;
                   };
 
@@ -2972,12 +2968,7 @@ function CreativeFlowApp() {
               if (!ord) return false;
               if (isPostedOrder(ord)) return true;
               const stLow = String(ord?.status || "").trim().toLowerCase();
-              return (
-                stLow === "selesai" ||
-                stLow === "siap posting" ||
-                stLow === "kurasi bm" ||
-                stLow === "review"
-              );
+              return stLow === "selesai" || stLow === "siap posting";
             };
 
             const displayedBrandOrders = (() => {
