@@ -503,6 +503,7 @@ class AppErrorBoundary extends React.Component {
 function CreativeFlowApp() {
   const [currentUser, setCurrentUser] = useState(null);
   const [newContentType, setNewContentType] = useState("");
+  const [newBrand, setNewBrand] = useState("");
   const [authLoading, setAuthLoading] = useState(true);
   const [authMode, setAuthMode] = useState("login");
   const [teamUsers, setTeamUsers] = useState([]);
