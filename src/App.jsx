@@ -4,6 +4,8 @@ import { auth, db } from "./firebase";
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, onAuthStateChanged, signOut } from "firebase/auth";
 import { collection, doc, setDoc, addDoc, updateDoc, onSnapshot, query, orderBy, serverTimestamp, getDoc, deleteDoc } from "firebase/firestore";
 
+import { WORKFLOW_ROLES, ORDER_STATUSES, normalizeWorkflowRole, validateOrderTransition, canViewAllTiktokAccounts, canCreateTiktokAccount, canCreateOrder, canCurateOrder, canMarkPosted } from "./workflowRules.js";
+import { dispatchWorkflowWaNotifications } from "./waWorkflowNotifier.js";
 const BRAND_LOGO_URL = "/Logo_3.jpeg";
 function isOrderVisibleToCurrentEditor(order, editorUser) {
   if (!order || !editorUser) return false;
@@ -40,22 +42,27 @@ function isOrderVisibleToCurrentEditor(order, editorUser) {
   return st === "Antrean";
 }
 
-function normalizeTeamRole(rawRole, fallback = "Brand Manager") {
-  const cleaned = String(rawRole || "").trim();
-  if (!cleaned) return fallback;
-  if (/social media specialist/i.test(cleaned)) return "Brand Manager";
-  return cleaned;
+function normalizeTeamRole(rawRole, fallback = WORKFLOW_ROLES.BRAND_MANAGER) {
+  return normalizeWorkflowRole(rawRole, fallback);
 }
 
-const ROLES = ["Brand Manager", "Video Editor"];
+const ROLES = [
+  WORKFLOW_ROLES.BRAND_MANAGER,
+  WORKFLOW_ROLES.PRODUCTION_TEAM,
+  WORKFLOW_ROLES.EDITOR,
+  WORKFLOW_ROLES.SOCIAL_MEDIA_MANAGER,
+];
 const PLATFORMS = ["TikTok", "Instagram Reels", "YouTube Shorts"];
 
 const STATUS_CONFIG = {
   "Antrean": { label: "Antrean", badgeClass: "bg-sky-50 text-sky-700 border-sky-200", dotClass: "bg-sky-500" },
   "Sedang Dikerjakan": { label: "Sedang Dikerjakan", badgeClass: "bg-amber-50 text-amber-700 border-amber-200", dotClass: "bg-amber-500" },
-  "Review": { label: "Review", badgeClass: "bg-indigo-50 text-indigo-700 border-indigo-200", dotClass: "bg-indigo-500" },
+  "Kurasi BM": { label: "Kurasi BM", badgeClass: "bg-indigo-50 text-indigo-700 border-indigo-200", dotClass: "bg-indigo-500" },
+  "Review": { label: "Kurasi BM", badgeClass: "bg-indigo-50 text-indigo-700 border-indigo-200", dotClass: "bg-indigo-500" },
   "Revisi": { label: "Revisi", badgeClass: "bg-rose-50 text-rose-700 border-rose-200", dotClass: "bg-rose-500" },
-  "Selesai": { label: "Selesai", badgeClass: "bg-emerald-50 text-emerald-700 border-emerald-200", dotClass: "bg-emerald-500" },
+  "Siap Posting": { label: "Siap Posting", badgeClass: "bg-emerald-50 text-emerald-700 border-emerald-200", dotClass: "bg-emerald-500" },
+  "Selesai": { label: "Siap Posting", badgeClass: "bg-emerald-50 text-emerald-700 border-emerald-200", dotClass: "bg-emerald-500" },
+  "Sudah Diposting": { label: "Sudah Diposting", badgeClass: "bg-sky-50 text-sky-700 border-sky-200", dotClass: "bg-sky-500" },
 };
 
 function getAccountWaStorageKey(prefix, user) {
@@ -626,45 +633,6 @@ function CreativeFlowApp() {
     );
   }, [orders, selectedOrderId]);
   const [isWaModalOpen, setIsWaModalOpen] = useState(false);
-  const [waWebhookUrl, setWaWebhookUrl] = useState(() => {
-    try {
-      return localStorage.getItem("cf_wa_webhook") || "";
-    } catch {
-      return "";
-    }
-  });
-  const [editWaNumber, setEditWaNumber] = useState("");
-
-  // State khusus alur submit editor & catatan revisi BM/SMS
-  const [showEditorSubmitTab, setShowEditorSubmitTab] = useState(false);
-  const [editorVideoUrl, setEditorVideoUrl] = useState("");
-  const [showRevisionInput, setShowRevisionInput] = useState(false);
-  const [revisionNote, setRevisionNote] = useState("");
-
-  const [newTitle, setNewTitle] = useState("");
-  const [newBrand, setNewBrand] = useState("");
-  const [newPlatform, setNewPlatform] = useState("TikTok");
-  const [newRawFootageUrl, setNewRawFootageUrl] = useState("");
-  const [newDeadline, setNewDeadline] = useState("");
-  const [newPriority, setNewPriority] = useState("Normal");
-  const [newAssignedEditor, setNewAssignedEditor] = useState("");
-  const [newReferenceUrl, setNewReferenceUrl] = useState("");
-  const [newBrief, setNewBrief] = useState("");
-  const [batchCount, setBatchCount] = useState(1);
-  const TIKTOK_CONTENT_TYPES = [
-  "Gudang",
-  "Motion Graphic",
-  "Trend",
-  "QnA /Talking head Pemasaran",
-  "One Person Conversation",
-  "No Face",
-  "Story Talling Gudang"
-];
-
-const sanitizeContentTypes = (list) =>
-  (Array.isArray(list) ? list : []).filter(
-    (item) => typeof item === "string" && !item.toLowerCase().includes("soft selling")
-  );
   const [tiktokAccounts, setTiktokAccounts] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem("cf_tiktok_accounts") || "[]");
@@ -780,6 +748,7 @@ const sanitizeContentTypes = (list) =>
 
   const handleSaveTiktokAccount = async (e) => {
     e.preventDefault();
+    if (!canCreateTiktokAccount(currentUser?.role)) return;
     const cleanBrand = ttBrandName.trim();
     let cleanAccount = ttAccountName.trim();
     if (!cleanBrand || !cleanAccount || (Array.isArray(ttSelectedTypes) ? ttSelectedTypes.length : 0) === 0) return;
@@ -901,12 +870,28 @@ const sanitizeContentTypes = (list) =>
 
   const handleMarkOrderAsPosted = async (order) => {
     if (!order || !order.docId) return;
+    if (!canMarkPosted(currentUser?.role)) return;
     setPostingOrderDocId(order.docId);
     try {
       await updateDoc(doc(db, "orders", order.docId), {
+        status: ORDER_STATUSES.POSTED,
         isPosted: true,
         postedAtMs: Date.now(),
         postedAt: serverTimestamp(),
+      });
+      await dispatchWorkflowWaNotifications({
+        eventType: "posted_completed",
+        order: { ...order, status: ORDER_STATUSES.POSTED, isPosted: true },
+        teamMembers: typeof teamUsers !== "undefined" ? teamUsers : [],
+        actor: typeof currentUser !== "undefined" ? currentUser : {},
+        videoUrl: order.videoUrl || order.resultUrl || "",
+        postUrl: order.postUrl || order.publishedUrl || "",
+        sendFn: async ({ phone, message }) => {
+          const cleanPhone = String(phone || "").replace(/[^0-9]/g, "");
+          if (cleanPhone && typeof window !== "undefined") {
+            console.debug("[WA_POSTED_COMPLETED]", { phone: cleanPhone, message });
+          }
+        },
       });
       const postedRecipients = Array.from(
         new Set(
@@ -924,30 +909,6 @@ const sanitizeContentTypes = (list) =>
           : [order.accountName || order.brand || currentUser?.name || "Tim"];
 
       for (const postedTarget of finalPostedRecipients) {
-        await pushWaNotification({
-          event: "Konten Sudah Diposting",
-          targetName: postedTarget,
-          targetEmail: (() => {
-            const pool = [...(Array.isArray(teamUsers) ? teamUsers : []), ...(Array.isArray(editors) ? editors : [])];
-            const q = String(postedTarget || "").trim().toLowerCase();
-            const found = pool.find((m) => m && ([m?.name, m?.fullName, m?.email].some((v) => String(v || "").trim().toLowerCase() === q)));
-            return String(found?.email || "").trim().toLowerCase();
-          })(),
-          targetUid: (() => {
-            const pool = [...(Array.isArray(teamUsers) ? teamUsers : []), ...(Array.isArray(editors) ? editors : [])];
-            const q = String(postedTarget || "").trim().toLowerCase();
-            const found = pool.find((m) => m && ([m?.name, m?.fullName, m?.email].some((v) => String(v || "").trim().toLowerCase() === q)));
-            return String(found?.uid || found?.userId || found?.id || found?.docId || "").trim();
-          })(),
-          phone: resolveTeamWhatsApp(postedTarget),
-          message: formatWaOrderMessage({
-            recipientName: postedTarget,
-            order,
-            note: order.brief || "-",
-            statusLabel: "Terposting",
-            closing: "Konten sudah berhasil diposting ya. Terima kasih!",
-          }),
-        });
       }
     } catch (err) {
       console.error("Gagal menandai konten sebagai sudah diposting:", err);
@@ -958,42 +919,37 @@ const sanitizeContentTypes = (list) =>
 
 
   const handleApproveComplete = async () => {
-    if (!selectedOrder) return;
+    if (!selectedOrder || !selectedOrder.docId) return;
+    if (!canCurateOrder(currentUser?.role)) return;
+    const nextStatus = ORDER_STATUSES.READY_TO_POST;
     await updateDoc(doc(db, "orders", selectedOrder.docId), {
-      status: "Selesai",
+      status: nextStatus,
+      curatedAt: typeof serverTimestamp === "function" ? serverTimestamp() : new Date().toISOString(),
     });
+    try {
+      await dispatchWorkflowWaNotifications({
+        eventType: "ready_to_post",
+        order: { ...selectedOrder, status: nextStatus },
+        teamMembers: typeof teamUsers !== "undefined" ? teamUsers : [],
+        actor: typeof currentUser !== "undefined" ? currentUser : {},
+        videoUrl: selectedOrder.videoUrl || selectedOrder.resultUrl || "",
+        note: selectedOrder.brief || "",
+        sendFn: async ({ phone, message }) => {
+          const cleanPhone = String(phone || "").replace(/[^0-9]/g, "");
+          if (cleanPhone && typeof window !== "undefined") {
+            console.debug("[WA_READY_TO_POST]", { phone: cleanPhone, message });
+          }
+        },
+      });
+    } catch (waErr) {
+      console.warn("Gagal mengirim notifikasi WA siap posting:", waErr);
+    }
     const editorTarget = selectedOrder.assignedEditor || selectedOrder.creatorName || "Video Editor";
-    await pushWaNotification({
-      event: "Siap Posting",
-      targetName: editorTarget,
-      phone: resolveTeamWhatsApp(editorTarget),
-      message: formatWaOrderMessage({
-        recipientName: editorTarget,
-        order: selectedOrder,
-        note: selectedOrder.brief || selectedOrder.editorVideoUrl || "-",
-        statusLabel: "Siap Posting",
-        closing: "Mantap, orderannya sudah dinyatakan siap posting ya. Terima kasih atas proses editnya!",
-      }),
-    });
 
     const bmTarget = String(
       selectedOrder.creatorName || selectedOrder.requestedBy || selectedOrder.requestedByEmail || ""
     ).trim();
     if (bmTarget) {
-      await pushWaNotification({
-        event: "Order Selesai Dikerjakan",
-        targetName: bmTarget,
-        targetEmail: selectedOrder.requestedByEmail || "",
-        targetUid: selectedOrder.requestedByUid || "",
-        phone: resolveTeamWhatsApp(bmTarget),
-        message: formatWaOrderMessage({
-          recipientName: bmTarget,
-          order: selectedOrder,
-          note: selectedOrder.brief || selectedOrder.editorVideoUrl || "-",
-          statusLabel: "Selesai Dikerjakan",
-          closing: "Order video sudah selesai dikerjakan ya. Silakan dicek hasilnya!",
-        }),
-      });
     }
   };
 
@@ -1014,142 +970,9 @@ const sanitizeContentTypes = (list) =>
     });
   };
 
-  const resolveTeamWhatsApp = (queryValue) => {
-    const rawQuery = String(queryValue || "").trim();
-    if (!rawQuery) return "";
-    const qLower = rawQuery.toLowerCase().replace(/\s+/g, " ");
-    const qDigits = rawQuery.replace(/\D+/g, "");
-    const pool = [
-      ...(Array.isArray(teamUsers) ? teamUsers : []),
-      ...(Array.isArray(editors) ? editors : []),
-    ].filter(Boolean);
 
-    const matched =
-      pool.find((m) => {
-        const ids = [m?.uid, m?.userId, m?.id, m?.docId]
-          .map((v) => String(v || "").trim())
-          .filter(Boolean);
-        if (ids.includes(rawQuery)) return true;
 
-        const email = String(m?.email || "").trim().toLowerCase();
-        if (email && email === qLower) return true;
-
-        const name = String(m?.name || m?.fullName || "").trim().toLowerCase().replace(/\s+/g, " ");
-        if (name && name === qLower) return true;
-
-        const memberDigits = String(m?.whatsapp || m?.phone || "").replace(/\D+/g, "");
-        if (qDigits && memberDigits && memberDigits === qDigits) return true;
-
-        return false;
-      }) || null;
-
-    const rawPhone = matched ? (matched.whatsapp || matched.phone || "") : rawQuery;
-    if (typeof normalizeWhatsApp === "function") {
-      return normalizeWhatsApp(rawPhone);
-    }
-    return String(rawPhone || "").replace(/[^\d+]/g, "");
-  };
-
-  const formatWaOrderMessage = ({ recipientName, order, note, statusLabel, closing } = {}) => {
-    const safeName = String(recipientName || "Tim").trim();
-    const orderId = String(order?.id || order?.docId || "-").trim();
-    const orderTitle = String(order?.title || order?.baseTitle || "-").trim();
-    const accountLabel = String(order?.brand || order?.accountName || "").trim();
-    const accountPart = accountLabel ? ` (${accountLabel})` : "";
-    const safeNote = String(note || order?.brief || "-").trim() || "-";
-    const safeStatus = String(statusLabel || order?.status || "Update").trim();
-    const safeClosing = String(closing || "").trim();
-
-    return [
-      `Hai ${safeName}, Orderan dengan nama: ${orderId} - ${orderTitle}${accountPart}`,
-      `Catatan order: ${safeNote}`,
-      `Status orderan: ${safeStatus}`,
-      safeClosing,
-    ]
-      .filter(Boolean)
-      .join(" ");
-  };
-
-  const pushWaNotification = async ({ event, targetName, targetEmail, targetUid, phone, message }) => {
-    const memberPool = [
-      ...(Array.isArray(teamUsers) ? teamUsers : []),
-      ...(Array.isArray(editors) ? editors : []),
-    ];
-
-    const rawTargetName = String(targetName || "").trim();
-    const rawTargetEmail = String(targetEmail || "").trim().toLowerCase();
-    const rawTargetUid = String(targetUid || "").trim();
-
-    const normKey = (v) => String(v || "").trim().toLowerCase().replace(/\s+/g, " ");
-    const targetIds = new Set(
-      [rawTargetUid, currentUser?.uid, currentUser?.id]
-        .map((v) => String(v || "").trim())
-        .filter((v) => v && v === rawTargetUid)
-    );
-
-    const matchedRecipient = memberPool.find((m) => {
-      if (!m) return false;
-      const mIds = [m?.uid, m?.userId, m?.id, m?.docId].map((v) => String(v || "").trim()).filter(Boolean);
-      const mEmail = normKey(m?.email);
-      const mName = normKey(m?.name || m?.fullName);
-      const qName = normKey(rawTargetName);
-      if (rawTargetUid && mIds.includes(rawTargetUid)) return true;
-      if (rawTargetEmail && mEmail && rawTargetEmail === mEmail) return true;
-      if (qName && mName && qName === mName) return true;
-      if (qName && mEmail && qName === mEmail) return true;
-      return false;
-    }) || (() => {
-      const qName = normKey(rawTargetName);
-      if (!qName) return null;
-      const nameParts = qName.split(" ").filter((p) => p.length >= 3);
-      if (nameParts.length === 0) return null;
-      return memberPool.find((m) => {
-        if (!m) return false;
-        const mName = normKey(m?.name || m?.fullName);
-        return mName && nameParts.every((part) => mName.includes(part));
-      }) || null;
-    })();
-
-    const resolvedTargetName = String(
-      matchedRecipient?.name || matchedRecipient?.fullName || rawTargetName || "Tim"
-    ).trim();
-    const resolvedTargetEmail = String(
-      matchedRecipient?.email || rawTargetEmail || ""
-    ).trim().toLowerCase();
-    const resolvedTargetUid = String(
-      matchedRecipient?.uid || matchedRecipient?.userId || matchedRecipient?.id || matchedRecipient?.docId || rawTargetUid || ""
-    ).trim();
-    const isCurrentUserTarget = Boolean(
-      currentUser &&
-      ((resolvedTargetUid && [currentUser?.uid, currentUser?.userId, currentUser?.id, currentUser?.docId].map((x) => String(x || "").trim()).includes(resolvedTargetUid)) ||
-        (resolvedTargetEmail && String(currentUser?.email || "").trim().toLowerCase() === resolvedTargetEmail) ||
-        (resolvedTargetName && normKey(currentUser?.name || currentUser?.fullName) === normKey(resolvedTargetName)))
-    );
-
-    const candidateRawPhone =
-      phone ||
-      extractRawWhatsAppField(matchedRecipient) ||
-      (typeof resolveTeamWhatsApp === "function"
-        ? resolveTeamWhatsApp(resolvedTargetEmail || resolvedTargetName)
-        : "") ||
-      (isCurrentUserTarget && typeof resolveCurrentUserWhatsApp === "function"
-        ? resolveCurrentUserWhatsApp(currentUser, memberPool)
-        : "") ||
-      "";
-
-    const resolvedPhone = normalizeWhatsApp(candidateRawPhone);
-
-    const nowTime = new Date().toLocaleTimeString("id-ID", {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-
-    const recipientObj = {
-      uid: resolvedTargetUid,
-      email: resolvedTargetEmail,
-      name: resolvedTargetName,
-      whatsapp: resolvedPhone,
-    };
+    const appendWaLogEntry = async ({ event, recipientObj, memberPool, resolvedTargetName, resolvedTargetEmail, resolvedTargetUid, resolvedPhone, message, nowTime } = {}) => {
     const recipientBucketKey = resolveWaCanonicalAccountKey(recipientObj, memberPool);
     const actorUid = String(currentUser?.uid || currentUser?.userId || currentUser?.id || currentUser?.docId || "").trim();
     const actorEmail = String(currentUser?.email || "").trim().toLowerCase();
@@ -1170,27 +993,6 @@ const sanitizeContentTypes = (list) =>
     };
 
     const isValidTargetPhone = /^62[1-9][0-9]{7,12}$/.test(String(resolvedPhone || ""));
-    if (WA_CLOUD_API_ENABLED && typeof sendWhatsAppNotification === "function" && isValidTargetPhone) {
-      try {
-        const explicitVars = typeof variables !== "undefined" && Array.isArray(variables) && variables.length > 0
-          ? variables
-          : null;
-        await sendWhatsAppNotification({
-          phone: resolvedPhone,
-          templateName: WA_TEMPLATE_NAME,
-          languageCode: WA_TEMPLATE_LANG,
-          variables: explicitVars || buildOrderWaVariables({
-            event: entry.event,
-            targetName: resolvedTargetName,
-            order: typeof order !== "undefined" ? order : null,
-            note: typeof note !== "undefined" ? note : "",
-            statusLabel: typeof statusLabel !== "undefined" ? statusLabel : entry.event,
-          }),
-        });
-      } catch (waErr) {
-        console.warn("Gagal kirim WA Cloud API (log tetap tersimpan):", waErr?.message || waErr);
-      }
-    }
 
     const targetStorageKey = `cf_wa_logs_${recipientBucketKey}`;
     try {
@@ -1222,51 +1024,8 @@ const sanitizeContentTypes = (list) =>
     } catch (err) {
       console.warn("Simpan log WA ke Firestore dilewati/gagal:", err?.message || err);
     }
+    };
 
-    try {
-      const fonnteToken = String(
-        (typeof import.meta !== "undefined" &&
-          import.meta.env &&
-          (import.meta.env.VITE_FONNTE_TOKEN || import.meta.env.FONNTE_TOKEN)) ||
-          ""
-      ).trim();
-
-      const fonnteTarget = String(resolvedPhone || "").replace(/\D/g, "");
-      if (fonnteToken && fonnteTarget && typeof fetch === "function" && entry.message) {
-        const fonnteRes = await fetch("https://api.fonnte.com/send", {
-          method: "POST",
-          headers: {
-            Authorization: fonnteToken,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            target: fonnteTarget,
-            message: entry.message,
-            countryCode: "62",
-          }),
-        });
-        const fonnteData = await fonnteRes.json().catch(() => null);
-        if (!fonnteRes.ok || (fonnteData && fonnteData.status === false)) {
-          console.warn("Fonnte API merespons gagal:", fonnteData || fonnteRes.status);
-        }
-      }
-    } catch (err) {
-      console.warn("Gagal mengirim pesan ke Fonnte API:", err?.message || err);
-    }
-
-    try {
-      const webhookUrl = String(waWebhookUrl || "").trim();
-      if (webhookUrl && /^https?:\/\//i.test(webhookUrl) && typeof fetch === "function") {
-        await fetch(webhookUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(entry),
-        });
-      }
-    } catch (err) {
-      console.warn("Kirim webhook WA gagal:", err?.message || err);
-    }
-  };
 
   const handleLogin = async (e) => {
     if (e && typeof e.preventDefault === "function") e.preventDefault();
@@ -1296,7 +1055,7 @@ const sanitizeContentTypes = (list) =>
     const emailVal = String(regEmail || "").trim();
     const passVal = String(regPassword || "");
     const whatsappVal = String(regWhatsapp || "").trim();
-    const roleVal = String(regRole || "Video Editor").trim() || "Video Editor";
+    const roleVal = String(regRole || WORKFLOW_ROLES.EDITOR).trim() || WORKFLOW_ROLES.EDITOR;
 
     if (!nameVal || !emailVal || !passVal) {
       setAuthError("Nama lengkap, email, dan kata sandi wajib diisi.");
@@ -1317,7 +1076,7 @@ const sanitizeContentTypes = (list) =>
         uid,
         name: nameVal,
         email: emailVal,
-        role: normalizeTeamRole(roleVal, "Brand Manager"),
+        role: normalizeWorkflowRole(roleVal, WORKFLOW_ROLES.BRAND_MANAGER),
         whatsapp: whatsappVal,
       };
 
@@ -1371,7 +1130,7 @@ const sanitizeContentTypes = (list) =>
     if (typeof setTiktokDrawerTab === "function") {
       setTiktokDrawerTab(tab === "edit" ? "edit" : "monitoring");
     }
-    if (!resolvedId && typeof setIsAddTiktokModalOpen === "function") {
+    if (!resolvedId && canCreateTiktokAccount(currentUser?.role) && typeof setIsAddTiktokModalOpen === "function") {
       setIsAddTiktokModalOpen(true);
       return;
     }
@@ -1571,6 +1330,7 @@ const sanitizeContentTypes = (list) =>
       roleStr === "admin" ||
       roleStr === "owner";
     const edRole = roleStr.includes("editor");
+    const smmRole = roleStr.includes("sosial media") || roleStr.includes("social media") || roleStr === "smm" || roleStr === "sosmed";
 
     return list.filter((order) => {
       if (!order) return false;
@@ -1605,6 +1365,10 @@ const sanitizeContentTypes = (list) =>
         const isEditorQueueOrRevision =
           st === "Antrean" || st === "Sedang Dikerjakan" || st === "Revisi";
         if (!isEditorQueueOrRevision) return false;
+      } else if (smmRole) {
+        const isSmmPublishQueue =
+          st === "Siap Posting" || st === "Selesai" || st === "Sudah Diposting" || isAlreadyPosted;
+        if (!isSmmPublishQueue) return false;
       }
 
       const matchesSearch =
@@ -2018,6 +1782,11 @@ const sanitizeContentTypes = (list) =>
           }
         );
       }
+
+    } catch (err) {
+      console.error("Gagal pasang listener tiktokAccounts:", err);
+    }
+
     try {
       const usersUnsub = onSnapshot(
         collection(db, "teamUsers"),
@@ -2038,10 +1807,6 @@ const sanitizeContentTypes = (list) =>
 
     } catch (err) {
       console.error("Gagal pasang listener teamUsers:", err);
-    }
-
-    } catch (err) {
-      console.error("Gagal pasang listener tiktokAccounts:", err);
     }
 
     return () => {
@@ -2152,80 +1917,7 @@ const sanitizeContentTypes = (list) =>
 
       const newOrderItem = createdOrders[0] || null;
       if (!newOrderItem) return;
-      if (typeof pushWaNotification === "function" && typeof formatWaOrderMessage === "function") {
-        const specificEditor = String(newOrderItem.assignedEditor || "").trim();
-        const orderNote = newOrderItem.brief || "-";
-        const poolMembers = [
-          ...(Array.isArray(editors) ? editors : []),
-          ...(Array.isArray(teamUsers) ? teamUsers : []),
-        ].filter(Boolean);
 
-        const editorCandidates = specificEditor
-          ? poolMembers.filter((m) => {
-              const n = String(m?.name || m?.fullName || "").trim().toLowerCase();
-              const e = String(m?.email || "").trim().toLowerCase();
-              const u = String(m?.uid || m?.userId || m?.id || m?.docId || "").trim();
-              const q = String(specificEditor || "").trim();
-              return n === q.toLowerCase() || e === q.toLowerCase() || u === q;
-            })
-          : poolMembers.filter((m) => String(m?.role || "").trim().toLowerCase().includes("editor"));
-
-        const rawEditorRecipients = editorCandidates.length > 0
-          ? editorCandidates.map((m) => ({
-              name: String(m?.name || m?.fullName || m?.email || specificEditor || "Video Editor").trim(),
-              email: String(m?.email || "").trim().toLowerCase(),
-              uid: String(m?.uid || m?.userId || m?.id || m?.docId || "").trim(),
-              phone: String(m?.whatsapp || m?.phone || "").trim(),
-            }))
-          : [{
-              name: String(specificEditor || "Khaedar Nasik").trim(),
-              email: "",
-              uid: "",
-              phone: "",
-            }];
-
-        const seenEditorKeys = new Set();
-        const editorRecipients = rawEditorRecipients.filter((rec) => {
-          const normPhone = typeof normalizeWhatsApp === "function"
-            ? normalizeWhatsApp(rec.phone || (typeof resolveTeamWhatsApp === "function" ? resolveTeamWhatsApp(rec.name) : ""))
-            : String(rec.phone || "").replace(/\D+/g, "");
-          const keys = [
-            rec.uid ? `uid:${rec.uid}` : "",
-            rec.email ? `email:${rec.email}` : "",
-            normPhone ? `phone:${normPhone}` : "",
-            rec.name ? `name:${rec.name.toLowerCase().replace(/\s+/g, " ")}` : "",
-          ].filter(Boolean);
-          if (keys.length === 0) return false;
-          if (keys.some((k) => seenEditorKeys.has(k))) return false;
-          keys.forEach((k) => seenEditorKeys.add(k));
-          return true;
-        });
-
-        if (import.meta.env.DEV) console.info("[CF_WA_DEBUG] editorRecipients order baru:", { orderId: newOrderItem.id, specificEditor, editorRecipients });
-        for (const edRec of editorRecipients) {
-          try {
-            const builtMsg = typeof formatWaOrderMessage === "function"
-              ? formatWaOrderMessage({
-                  recipientName: edRec.name,
-                  order: newOrderItem,
-                  note: orderNote,
-                  statusLabel: "Dalam Antrean",
-                  closing: "Ada orderan video baru dari Brand Manager yang masuk ke antrean ya. Silakan dicek detail dan brief-nya!",
-                })
-              : `Orderan baru masuk antrean untuk ${edRec.name}: ${newOrderItem.title || newOrderItem.id}`;
-            await pushWaNotification({
-              event: "Orderan Baru Masuk Antrean",
-              targetName: edRec.name,
-              targetEmail: edRec.email,
-              targetUid: edRec.uid,
-              phone: edRec.phone || (typeof resolveTeamWhatsApp === "function" ? resolveTeamWhatsApp(edRec.name) : ""),
-              message: builtMsg,
-            });
-          } catch (notifErr) {
-            console.warn("Gagal mengirim notif order baru ke editor:", notifErr?.message || notifErr);
-          }
-        }
-      }
       if (typeof setNewTitle === "function") setNewTitle("");
       if (typeof setBatchCount === "function") setBatchCount(1);
       if (typeof setNewContentType === "function") setNewContentType("");
@@ -2245,11 +1937,28 @@ const sanitizeContentTypes = (list) =>
 
   const handleOrderStatusTransition = async (orderObj, nextStatus, extraFields = {}) => {
     if (!orderObj || !nextStatus) return;
+    const normalizedNext =
+      nextStatus === "Review"
+        ? ORDER_STATUSES.BM_CURATION
+        : nextStatus === "Selesai"
+        ? ORDER_STATUSES.POSTED
+        : nextStatus;
+    const actorRole = typeof currentUser !== "undefined" ? currentUser?.role : "";
+    const check = validateOrderTransition({
+      actorRole,
+      currentStatus: orderObj.status,
+      nextStatus: normalizedNext,
+      payload: { ...orderObj, ...extraFields },
+    });
+    if (!check.ok && actorRole) {
+      alert(check.reason);
+      return;
+    }
     const targetId = orderObj.docId || orderObj.id;
     const payload = {
-      status: nextStatus,
-      updatedAt: new Date().toISOString(),
       ...extraFields,
+      status: normalizedNext,
+      updatedAt: new Date().toISOString(),
     };
     try {
       if (
@@ -2269,6 +1978,36 @@ const sanitizeContentTypes = (list) =>
             return match ? { ...item, ...payload } : item;
           })
         );
+      }
+      const eventMap = {
+        [ORDER_STATUSES.IN_PROGRESS]: "job_assigned",
+        [ORDER_STATUSES.BM_CURATION]: "submitted_for_curation",
+        [ORDER_STATUSES.REVISION]: "revision_requested",
+        [ORDER_STATUSES.READY_TO_POST]: "ready_to_post",
+        [ORDER_STATUSES.POSTED]: "posted_completed",
+      };
+      const waEventType = eventMap[normalizedNext];
+      if (waEventType) {
+        const mergedOrder = { ...orderObj, ...payload };
+        const membersList = typeof teamUsers !== "undefined" ? teamUsers : [];
+        const actorObj = typeof currentUser !== "undefined" ? currentUser : {};
+        await dispatchWorkflowWaNotifications({
+          eventType: waEventType,
+          order: mergedOrder,
+          teamMembers: membersList,
+          actor: actorObj,
+          videoUrl: payload.videoUrl || payload.previewUrl || mergedOrder.videoUrl || "",
+          note: payload.revisionNote || payload.note || mergedOrder.revisionNote || mergedOrder.brief || "",
+          postUrl: payload.postUrl || payload.publishedUrl || mergedOrder.postUrl || "",
+          sendFn: async ({ phone, message }) => {
+            const res = await fetch("/api/send-wa", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ phone, message }),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          },
+        });
       }
     } catch (err) {
       console.error("Gagal memperbarui status order:", err);
@@ -2296,26 +2035,6 @@ const sanitizeContentTypes = (list) =>
     };
     if (typeof handleOrderStatusTransition === "function") {
       await handleOrderStatusTransition(target, nextStatus, claimPayload);
-    }
-    if (typeof pushWaNotification === "function") {
-      const bmRecipient = target.requestedBy || target.creatorName || target.requestedByEmail || "";
-      if (bmRecipient) {
-        const orderCode = target?.id ? `${target.id} - ` : "";
-        const orderTitle = target?.title || "Untitled Order";
-        await pushWaNotification({
-          event: "Orderan Sedang Dikerjakan",
-          targetName: bmRecipient,
-          targetEmail: target.requestedByEmail || "",
-          targetUid: target.requestedByUid || "",
-          phone: typeof resolveTeamWhatsApp === "function" ? resolveTeamWhatsApp(bmRecipient) : "",
-          message: [
-            `Halo ${bmRecipient}, orderan ${orderCode}${orderTitle} sedang dikerjakan oleh Video Editor ${editorLabel}.`,
-            `Status: Sedang Dikerjakan`,
-            `Catatan: ${target?.brief || "-"}`,
-            `Progres pengerjaan video sudah dimulai ya.`,
-          ].join("\n"),
-        });
-      }
     }
 
         if (target.docId && typeof db !== "undefined" && typeof updateDoc === "function" && typeof doc === "function") {
@@ -2345,51 +2064,12 @@ const sanitizeContentTypes = (list) =>
       return;
     }
     if (typeof handleOrderStatusTransition === "function") {
-      await handleOrderStatusTransition(target, "Review", {
+      await handleOrderStatusTransition(target, ORDER_STATUSES.BM_CURATION, {
         previewUrl: cleanUrl,
         videoUrl: cleanUrl,
         submittedBy: currentUser?.name || currentUser?.email || "Video Editor",
         submittedAt: new Date().toISOString(),
       });
-    }
-    if (typeof pushWaNotification === "function") {
-      const bmRecipient = String(
-        target?.requestedBy ||
-        target?.creatorName ||
-        target?.requestedByEmail ||
-        target?.createdBy ||
-        ""
-      ).trim();
-      const bmEmail = String(target?.requestedByEmail || target?.creatorEmail || "").trim().toLowerCase();
-      const bmUid = String(target?.requestedByUid || target?.creatorUid || "").trim();
-      const editorActor = String(currentUser?.name || currentUser?.email || target?.assignedEditor || "Video Editor").trim();
-      const wasRevision =
-        String(target?.status || "").trim() === "Revisi" ||
-        Boolean(String(target?.revisionNote || "").trim());
-      if (bmRecipient || bmEmail || bmUid) {
-        const safeBmName = bmRecipient || bmEmail || "Brand Manager";
-        const orderCode = target?.id ? `${target.id} - ` : "";
-        const orderTitle = target?.title || "Untitled Order";
-        await pushWaNotification({
-          event: wasRevision ? "Orderan Sudah Direvisi" : "Editan Selesai & Siap Review",
-          targetName: safeBmName,
-          targetEmail: bmEmail,
-          targetUid: bmUid,
-          phone: typeof resolveTeamWhatsApp === "function"
-            ? resolveTeamWhatsApp(bmEmail || bmUid || safeBmName)
-            : "",
-          message: [
-            wasRevision
-              ? `Halo ${safeBmName}, hasil revisi untuk orderan ${orderCode}${orderTitle} sudah selesai dikerjakan oleh ${editorActor}.`
-              : `Halo ${safeBmName}, editan untuk orderan ${orderCode}${orderTitle} sudah selesai dikerjakan oleh ${editorActor} dan siap review.`,
-            "Status: Review",
-            `Link Video: ${cleanUrl}`,
-            wasRevision
-              ? "Perbaikan revisinya sudah dikirim ulang ya, silakan dicek kembali."
-              : "Hasil edit sudah dikirim dan siap untuk di-review ya.",
-          ].join("\n"),
-        });
-      }
     }
 
     if (typeof setEditorVideoUrl === "function") setEditorVideoUrl("");
@@ -2472,7 +2152,7 @@ const sanitizeContentTypes = (list) =>
 
             </div>
             <div className="mt-8 pt-4 border-t border-white/15 text-xs text-sky-100">
-              Role: <span className="text-amber-300 font-semibold">Brand Manager</span> • <span className="text-amber-300 font-semibold">Video Editor</span>
+              Role: <span className="text-amber-300 font-semibold">Brand Manager</span> • <span className="text-amber-300 font-semibold">Team Produksi</span> • <span className="text-amber-300 font-semibold">Editor</span> • <span className="text-amber-300 font-semibold">Sosial Media Manager</span>
             </div>
           </div>
 
@@ -2680,29 +2360,33 @@ const sanitizeContentTypes = (list) =>
             <h2 className="text-lg font-bold text-slate-900">Antrean Produksi Video Vertikal (9:16)</h2>
             <p className="text-xs text-slate-500 mt-0.5">Tersinkronisasi langsung dengan Firestore • Anggota tim terdaftar: {(Array.isArray(teamUsers) ? teamUsers.length : 0)} orang.</p>
           </div>
-          {currentUser.role !== "Video Editor" && (
+          {(canCreateTiktokAccount(currentUser?.role) || canCreateOrder(currentUser?.role)) && (
             <div className="flex flex-wrap items-center gap-2 shrink-0">
-            <button
-                type="button"
-                onClick={() => setIsAddTiktokModalOpen(true)}
-                className="px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-500 text-slate-950 text-xs font-bold cursor-pointer"
-              >
-                + Tambah Akun TikTok
-              </button>
-              <button type="button" onClick={() => {
-                if (typeof setNewTitle === "function") setNewTitle("");
-                if (typeof setNewBrand === "function") setNewBrand("");
-                if (typeof setNewPlatform === "function") setNewPlatform("TikTok");
-                if (typeof setNewContentType === "function") setNewContentType("");
-                if (typeof setNewBrief === "function") setNewBrief("");
-                if (typeof setNewRawFootageUrl === "function") setNewRawFootageUrl("");
-                if (typeof setNewReferenceUrl === "function") setNewReferenceUrl("");
-                if (typeof setNewDeadline === "function") setNewDeadline("");
-                if (typeof setNewPriority === "function") setNewPriority("Normal");
-                if (typeof setIsNewOrderOpen === "function") setIsNewOrderOpen(true);
-              }} className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold transition cursor-pointer shrink-0">
-              <Plus className="w-4 h-4" />Buat Order Video
-            </button>
+              {canCreateTiktokAccount(currentUser?.role) && (
+                <button
+                  type="button"
+                  onClick={() => setIsAddTiktokModalOpen(true)}
+                  className="px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-500 text-slate-950 text-xs font-bold cursor-pointer"
+                >
+                  + Tambah Akun TikTok
+                </button>
+              )}
+              {canCreateOrder(currentUser?.role) && (
+                <button type="button" onClick={() => {
+                  if (typeof setNewTitle === "function") setNewTitle("");
+                  if (typeof setNewBrand === "function") setNewBrand("");
+                  if (typeof setNewPlatform === "function") setNewPlatform("TikTok");
+                  if (typeof setNewContentType === "function") setNewContentType("");
+                  if (typeof setNewBrief === "function") setNewBrief("");
+                  if (typeof setNewRawFootageUrl === "function") setNewRawFootageUrl("");
+                  if (typeof setNewReferenceUrl === "function") setNewReferenceUrl("");
+                  if (typeof setNewDeadline === "function") setNewDeadline("");
+                  if (typeof setNewPriority === "function") setNewPriority("Normal");
+                  if (typeof setIsNewOrderOpen === "function") setIsNewOrderOpen(true);
+                }} className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold transition cursor-pointer shrink-0">
+                  <Plus className="w-4 h-4" />Buat Order Video
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -2766,7 +2450,7 @@ const sanitizeContentTypes = (list) =>
           const reviewOrReadyCount = allOrders.filter((ord) => {
             if (isPostedItem(ord)) return false;
             const st = String(ord?.status || "").trim();
-            return st === "Review" || st === "Selesai";
+            return st === "Kurasi BM" || st === "Review" || st === "Siap Posting" || st === "Selesai";
           }).length;
           const alreadyPostedCount = allOrders.filter((ord) => isPostedItem(ord)).length;
 
@@ -2840,7 +2524,7 @@ const sanitizeContentTypes = (list) =>
                 if (activeCardCfg.key === "work_revision")
                   return !posted && (st === "Sedang Dikerjakan" || st === "Revisi");
                 if (activeCardCfg.key === "review_ready")
-                  return !posted && (st === "Review" || st === "Selesai");
+                  return !posted && (st === "Kurasi BM" || st === "Review" || st === "Siap Posting" || st === "Selesai");
                 if (activeCardCfg.key === "posted") return posted;
                 return false;
               })
@@ -2855,8 +2539,14 @@ const sanitizeContentTypes = (list) =>
               .map(({ order }) => order);
 
             if (activeCardCfg.key === "review_ready") {
-              const rev = filtered.filter((o) => String(o?.status || "").trim() === "Review");
-              const ready = filtered.filter((o) => String(o?.status || "").trim() === "Selesai");
+              const rev = filtered.filter((o) => {
+                const s = String(o?.status || "").trim();
+                return s === "Kurasi BM" || s === "Review";
+              });
+              const ready = filtered.filter((o) => {
+                const s = String(o?.status || "").trim();
+                return s === "Siap Posting" || s === "Selesai";
+              });
               return [...rev, ...ready];
             }
             return filtered;
@@ -2960,6 +2650,7 @@ const sanitizeContentTypes = (list) =>
 
 
           {/* Grid Card Akun TikTok (Real-Time dari Firestore) */}
+          {canViewAllTiktokAccounts(currentUser?.role) && (
           <section className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-baseline gap-2.5">
@@ -2979,7 +2670,9 @@ const sanitizeContentTypes = (list) =>
               <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-6 text-center space-y-2">
                 <p className="text-sm font-semibold text-slate-700">Belum ada akun TikTok terdaftar</p>
                 <p className="text-xs text-slate-500">
-                  Klik tombol "+ Tambah Akun TikTok" di atas untuk menambahkan akun pertama Anda.
+                  {canCreateTiktokAccount(currentUser?.role)
+                    ? 'Klik tombol "+ Tambah Akun TikTok" di atas untuk menambahkan akun pertama Anda.'
+                    : "Penambahan akun TikTok baru hanya dapat dilakukan oleh Brand Manager."}
                 </p>
               </div>
             ) : (
@@ -3074,6 +2767,7 @@ const sanitizeContentTypes = (list) =>
               </div>
             )}
           </section>
+          )}
 
           {/* Grid Daftar Order Video Utama */}
           {(() => {
@@ -3795,15 +3489,21 @@ const sanitizeContentTypes = (list) =>
                       </div>
                     )}
 
-                    {selectedOrder.status === "Review" && (
+                    {(selectedOrder.status === "Kurasi BM" || selectedOrder.status === "Review") && (
                       <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 text-xs text-indigo-800 font-medium">
-                        Video sudah dikirim dan berstatus <span className="font-bold">Review</span>. Menunggu keputusan Brand Manager atau Brand Manager (Revisi / Selesai).
+                        Video sudah dikirim dan berstatus <span className="font-bold">Kurasi BM</span>. Menunggu kurasi Brand Manager (Revisi / Siap Posting).
                       </div>
                     )}
 
-                    {selectedOrder.status === "Selesai" && (
+                    {(selectedOrder.status === "Siap Posting" || selectedOrder.status === "Selesai") && !selectedOrder.isPosted && (
                       <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-medium">
-                        Order ini telah dinyatakan <span className="font-bold">Selesai</span>.
+                        Order ini telah lolos kurasi dan berstatus <span className="font-bold">Siap Posting</span> untuk dipublikasikan oleh SMM.
+                      </div>
+                    )}
+
+                    {selectedOrder.status === "Sudah Diposting" && (
+                      <div className="p-3 rounded-xl bg-sky-50 border border-sky-200 text-xs text-sky-800 font-medium">
+                        Konten telah dipublikasikan dan berstatus <span className="font-bold">Sudah Diposting</span>.
                       </div>
                     )}
                   </div>
@@ -3816,8 +3516,9 @@ const sanitizeContentTypes = (list) =>
                         {selectedOrder.status === "Antrean" && "Keterangan: Masih dalam antrean editor"}
                         {selectedOrder.status === "Sedang Dikerjakan" && "Keterangan: Sedang dikerjakan oleh editor"}
                         {selectedOrder.status === "Revisi" && "Keterangan: Sedang direvisi oleh editor"}
-                        {selectedOrder.status === "Review" && "Keterangan: Editor sudah kirim hasil, siap review"}
-                        {selectedOrder.status === "Selesai" && "Keterangan: Order sudah selesai"}
+                        {(selectedOrder.status === "Kurasi BM" || selectedOrder.status === "Review") && "Keterangan: Menunggu kurasi Brand Manager"}
+                        {(selectedOrder.status === "Siap Posting" || selectedOrder.status === "Selesai") && !selectedOrder.isPosted && "Keterangan: Lolos kurasi, siap diposting SMM"}
+                        {selectedOrder.status === "Sudah Diposting" && "Keterangan: Sudah dipublikasikan"}
                       </span>
                     </div>
 
@@ -3837,7 +3538,7 @@ const sanitizeContentTypes = (list) =>
 
                       <button
                         type="button"
-                        disabled={selectedOrder.status !== "Review"}
+                        disabled={!canCurateOrder(currentUser?.role) || (selectedOrder.status !== "Kurasi BM" && selectedOrder.status !== "Review")}
                         onClick={handleApproveComplete}
                         className="inline-flex items-center justify-center gap-1.5 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-semibold text-xs transition cursor-pointer"
                       >
@@ -3846,7 +3547,7 @@ const sanitizeContentTypes = (list) =>
                       </button>
                     </div>
 
-                    {selectedOrder.status === "Selesai" && !selectedOrder.isPosted && (
+                    {canMarkPosted(currentUser?.role) && (selectedOrder.status === "Siap Posting" || selectedOrder.status === "Selesai") && !selectedOrder.isPosted && (
                       <div className="pt-2">
                         <button
                           type="button"
@@ -3882,13 +3583,13 @@ const sanitizeContentTypes = (list) =>
                       </div>
                     )}
 
-                    {selectedOrder.status !== "Review" && (
+                    {selectedOrder.status !== "Kurasi BM" && selectedOrder.status !== "Review" && (
                       <p className="text-[11px] text-slate-500">
-                        Tombol <span className="font-semibold">Revisi</span> dan <span className="font-semibold">Selesai</span> hanya aktif setelah editor mengirim hasil video (status <span className="font-semibold text-indigo-700">Review</span>).
+                        Tombol <span className="font-semibold">Revisi</span> dan <span className="font-semibold">Siap Posting</span> hanya aktif saat status <span className="font-semibold text-indigo-700">Kurasi BM</span> untuk Brand Manager.
                       </p>
                     )}
 
-                    {showRevisionInput && selectedOrder.status === "Review" && (
+                    {showRevisionInput && canCurateOrder(currentUser?.role) && (selectedOrder.status === "Kurasi BM" || selectedOrder.status === "Review") && (
                       <form onSubmit={async (e) => {
                         if (e && typeof e.preventDefault === "function") e.preventDefault();
                         const currentOrderSnapshot = selectedOrder;
@@ -3902,50 +3603,6 @@ const sanitizeContentTypes = (list) =>
                               status: "Revisi",
                               revisionNote: cleanNote,
                               updatedAt: typeof serverTimestamp === "function" ? serverTimestamp() : new Date().toISOString(),
-                            });
-                          }
-                          if (currentOrderSnapshot && typeof pushWaNotification === "function") {
-                            const editorTarget = String(
-                              currentOrderSnapshot.assignedEditor ||
-                              currentOrderSnapshot.editorName ||
-                              currentOrderSnapshot.submittedBy ||
-                              currentOrderSnapshot.claimedBy ||
-                              "Video Editor"
-                            ).trim();
-                            const editorEmail = String(
-                              currentOrderSnapshot.assignedEditorEmail ||
-                              currentOrderSnapshot.claimedByEmail ||
-                              ""
-                            ).trim();
-                            const editorUid = String(
-                              currentOrderSnapshot.assignedEditorUid ||
-                              currentOrderSnapshot.claimedByUid ||
-                              ""
-                            ).trim();
-                            const orderCode = currentOrderSnapshot?.id ? `${currentOrderSnapshot.id} - ` : "";
-                            const orderTitle = currentOrderSnapshot?.title || "Untitled Order";
-                            const accountLabel =
-                              currentOrderSnapshot?.accountName || currentOrderSnapshot?.brand
-                                ? ` (${currentOrderSnapshot?.accountName || currentOrderSnapshot?.brand})`
-                                : "";
-                            const revisionMessage = [
-                              `Hai ${editorTarget || "Tim"},`,
-                              `Orderan dengan nama: ${orderCode}${orderTitle}${accountLabel}`,
-                              `Catatan order: ${cleanNote}`,
-                              "Status orderan: Revisi",
-                              "",
-                              "Ada catatan revisi nih, silakan dicek dan disesuaikan ya biar bisa segera lanjut ke tahap berikutnya.",
-                            ].join("\n");
-
-                            await pushWaNotification({
-                              event: "Revisi",
-                              targetName: editorTarget,
-                              targetEmail: editorEmail,
-                              targetUid: editorUid,
-                              phone: typeof resolveTeamWhatsApp === "function"
-                                ? resolveTeamWhatsApp(editorTarget)
-                                : "",
-                              message: revisionMessage,
                             });
                           }
                           if (typeof setShowRevisionInput === "function") setShowRevisionInput(false);
@@ -4433,7 +4090,7 @@ const sanitizeContentTypes = (list) =>
         );
       })()}
 
-      {isAddTiktokModalOpen && (
+      {isAddTiktokModalOpen && canCreateTiktokAccount(currentUser?.role) && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-200 max-w-md w-full p-6 shadow-xl space-y-4">
             <div className="flex items-center justify-between">
@@ -4590,66 +4247,6 @@ const sanitizeContentTypes = (list) =>
     </>
 
   );
-}
-
-async function sendWhatsAppNotification({
-  phone,
-  templateName,
-  languageCode = "id",
-  variables = [],
-}) {
-  if (!phone) {
-    throw new Error("Nomor WhatsApp tujuan kosong.");
-  }
-
-  const res = await fetch("/api/send-wa", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      to: phone,
-      templateName,
-      languageCode,
-      variables,
-    }),
-  });
-
-  const data = await res.json();
-  if (!res.ok || !data?.ok) {
-    throw new Error(data?.error || "Gagal mengirim notifikasi WhatsApp");
-  }
-
-  return data;
-}
-
-
-const WA_CLOUD_API_ENABLED = true; // Ubah ke true saat siap kirim nyata lewat /api/send-wa
-const WA_TEMPLATE_NAME = "update_order_creativeflow"; // Ganti sesuai nama template Aktif di Meta
-const WA_TEMPLATE_LANG = "id";
-
-function cleanSingleLineWa(val, fallback = "-") {
-  const out = String(val ?? "")
-    .replace(/[\r\n\t]+/g, " ")
-    .replace(/\s{2,}/g, " ")
-    .trim();
-  return out || fallback;
-}
-
-function buildOrderWaVariables({ event, targetName, order, note, statusLabel }) {
-  const recipient = cleanSingleLineWa(targetName, "Tim");
-  const title = cleanSingleLineWa(order?.title, "Untitled Order");
-  const codeId = cleanSingleLineWa(order?.id, "");
-  const orderLabel = cleanSingleLineWa(codeId ? `${codeId} - ${title}` : title, "Order");
-  const stageAndNote = cleanSingleLineWa(
-    [
-      statusLabel || event || "Update Order",
-      note || order?.brief || "",
-    ]
-      .filter(Boolean)
-      .join(" - "),
-    "Update Order"
-  );
-
-  return [recipient, orderLabel, stageAndNote];
 }
 
 export default function App() {
