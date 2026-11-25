@@ -700,6 +700,7 @@ function CreativeFlowApp() {
   const [accountPlatformFilter, setAccountPlatformFilter] = useState("Semua");
   const [tiktokContentFilter, setTiktokContentFilter] = useState("Semua"); // "Semua" | "Siap Posting" | "Sudah Diposting" | "Proses"
   const [selectedEditorContentType, setSelectedEditorContentType] = useState("Semua");
+  const [editorContentPopupType, setEditorContentPopupType] = useState(null);
   const [brandManagerContentTypes, setBrandManagerContentTypes] = useState([]);
   const [ttBrandLogo, setTtBrandLogo] = useState("");
   const [editTtBrandLogo, setEditTtBrandLogo] = useState("");
@@ -2958,95 +2959,234 @@ function CreativeFlowApp() {
               }
             }
 
-            const contentTypeCards = Array.from(typeMap.values());
+            const contentTypeCards = Array.from(typeMap.values()).map((entry) => {
+              const queueAndRevisionOrders = (entry.orders || []).filter((ord) => {
+                const st = String(ord?.status || "").trim();
+                return st === "Antrean" || st === "Revisi";
+              });
+              return {
+                ...entry,
+                orders: queueAndRevisionOrders,
+                queueOrRevisionCount: queueAndRevisionOrders.length,
+              };
+            });
+
+            const activePopupGroup = editorContentPopupType
+              ? contentTypeCards.find(
+                  (item) => normType(item.label) === normType(editorContentPopupType)
+                ) || {
+                  label: editorContentPopupType,
+                  orders: (Array.isArray(orders) ? orders : []).filter((ord) => {
+                    if (!ord) return false;
+                    const st = String(ord?.status || "").trim();
+                    if (st !== "Antrean" && st !== "Revisi") return false;
+                    if (typeof currentUser !== "undefined" && currentUser && !isOrderVisibleToCurrentEditor(ord, currentUser)) {
+                      return false;
+                    }
+                    return extractOrderTypes(ord).some(
+                      (t) => normType(t) === normType(editorContentPopupType)
+                    );
+                  }),
+                  queueOrRevisionCount: 0,
+                }
+              : null;
 
             return (
-              <section className="space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-baseline gap-2.5">
-                    <h2 className="text-base font-bold text-slate-900">Jenis Konten</h2>
-                    <span className="text-xs font-medium text-slate-500">
-                      {contentTypeCards.length} jenis konten
-                    </span>
+              <>
+                <section className="space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-baseline gap-2.5">
+                      <h2 className="text-base font-bold text-slate-900">Jenis Konten</h2>
+                      <span className="text-xs font-medium text-slate-500">
+                        {contentTypeCards.length} jenis konten
+                      </span>
+                    </div>
+                    {selectedEditorContentType !== "Semua" && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedEditorContentType("Semua")}
+                        className="text-xs font-semibold text-sky-700 hover:text-sky-800 cursor-pointer"
+                      >
+                        Tampilkan semua jenis konten
+                      </button>
+                    )}
                   </div>
-                  {selectedEditorContentType !== "Semua" && (
-                    <button
-                      type="button"
-                      onClick={() => setSelectedEditorContentType("Semua")}
-                      className="text-xs font-semibold text-sky-700 hover:text-sky-800 cursor-pointer"
-                    >
-                      Tampilkan semua jenis konten
-                    </button>
-                  )}
-                </div>
 
-                {contentTypeCards.length === 0 ? (
-                  <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-6 text-center">
-                    <p className="text-sm font-semibold text-slate-700">
-                      Belum ada jenis konten terdaftar pada akun TikTok
-                    </p>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {contentTypeCards.map((item) => {
-                      const isSelected =
-                        normType(selectedEditorContentType) === normType(item.label);
-                      const totalOrderCount = item.orders.length;
+                  {contentTypeCards.length === 0 ? (
+                    <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-6 text-center">
+                      <p className="text-sm font-semibold text-slate-700">
+                        Belum ada jenis konten terdaftar pada akun TikTok
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {contentTypeCards.map((item) => {
+                        const isSelected =
+                          normType(selectedEditorContentType) === normType(item.label);
+                        const orderCount = item.orders.length;
 
-                      return (
-                        <button
-                          key={item.label}
-                          type="button"
-                          onClick={() =>
-                            setSelectedEditorContentType((prev) =>
-                              normType(prev) === normType(item.label) ? "Semua" : item.label
-                            )
-                          }
-                          className={
-                            "text-left rounded-2xl border p-5 shadow-xs transition flex flex-col justify-between gap-3 cursor-pointer " +
-                            (isSelected
-                              ? "bg-sky-50/70 border-sky-500 ring-2 ring-sky-500/20"
-                              : "bg-white border-slate-200 hover:border-slate-300")
-                          }
-                        >
-                          <div className="space-y-2">
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="font-bold text-sm text-slate-900">
-                                {item.label}
-                              </span>
-                              {isSelected && (
-                                <span className="px-2 py-0.5 rounded-md bg-sky-600 text-white text-[10px] font-semibold">
-                                  Dipilih
-                                </span>
-                              )}
-                            </div>
-                            <p className="text-xs text-slate-500">
-                              Klik untuk memilih & memfilter order jenis konten ini
-                            </p>
-                          </div>
+                        const handleSelectContentType = () => {
+                          setSelectedEditorContentType(item.label);
+                          setEditorContentPopupType(item.label);
+                        };
 
-                          <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
-                            <span
-                              className={
-                                "px-2.5 py-1 rounded-md text-xs font-semibold " +
-                                (totalOrderCount > 0
-                                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                                  : "bg-slate-100 text-slate-600")
+                        return (
+                          <div
+                            key={item.label}
+                            role="button"
+                            tabIndex={0}
+                            onClick={handleSelectContentType}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                handleSelectContentType();
                               }
-                            >
-                              {totalOrderCount} video order
-                            </span>
-                            <span className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700">
-                              <span>{isSelected ? "Aktif" : "Pilih"}</span>
-                              <ChevronRight className="w-3.5 h-3.5" />
+                            }}
+                            className={
+                              "text-left rounded-2xl border p-5 shadow-xs transition flex flex-col justify-between gap-3 cursor-pointer " +
+                              (isSelected
+                                ? "bg-sky-50/70 border-sky-500 ring-2 ring-sky-500/20"
+                                : "bg-white border-slate-200 hover:border-slate-300")
+                            }
+                          >
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-bold text-sm text-slate-900">
+                                  {item.label}
+                                </span>
+                                {isSelected && (
+                                  <span className="px-2 py-0.5 rounded-md bg-sky-600 text-white text-[10px] font-semibold">
+                                    Dipilih
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-xs text-slate-500">
+                                Klik untuk melihat daftar order Antrean & Revisi
+                              </p>
+                            </div>
+
+                            <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
+                              <span
+                                className={
+                                  "px-2.5 py-1 rounded-md text-xs font-semibold " +
+                                  (orderCount > 0
+                                    ? "bg-amber-50 text-amber-800 border border-amber-200"
+                                    : "bg-slate-100 text-slate-600")
+                                }
+                              >
+                                {orderCount} video order
+                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleSelectContentType();
+                                }}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold cursor-pointer"
+                              >
+                                <span>Pilih</span>
+                                <ChevronRight className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+
+                {activePopupGroup && (
+                  <div
+                    className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4"
+                    onClick={() => setEditorContentPopupType(null)}
+                  >
+                    <div
+                      className="bg-white rounded-2xl border border-slate-200 max-w-xl w-full p-6 shadow-xl space-y-4 max-h-[85vh] flex flex-col"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="inline-flex items-center gap-2 flex-wrap">
+                            <h3 className="font-bold text-base text-slate-900">
+                              Order Jenis Konten: {activePopupGroup.label}
+                            </h3>
+                            <span className="px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200 text-xs font-semibold">
+                              {activePopupGroup.orders.length} order
                             </span>
                           </div>
+                          <p className="text-xs text-slate-500 mt-0.5">
+                            Daftar order berstatus Antrean & Revisi. Pilih order yang ingin dikerjakan.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setEditorContentPopupType(null)}
+                          className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"
+                        >
+                          <X className="w-4 h-4" />
                         </button>
-                      );
-                    })}
+                      </div>
+
+                      <div className="overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-xl">
+                        {activePopupGroup.orders.length === 0 ? (
+                          <div className="p-6 text-center text-sm text-slate-500">
+                            Tidak ada order berstatus Antrean atau Revisi untuk jenis konten ini.
+                          </div>
+                        ) : (
+                          activePopupGroup.orders.map((ord) => {
+                            const stLabel = String(ord?.status || "Antrean").trim();
+                            const isRev = stLabel === "Revisi";
+                            return (
+                              <div
+                                key={ord.docId || ord.id}
+                                onClick={() => {
+                                  if (typeof setShowEditorSubmitTab === "function") {
+                                    setShowEditorSubmitTab(false);
+                                  }
+                                  if (typeof setShowRevisionInput === "function") {
+                                    setShowRevisionInput(false);
+                                  }
+                                  if (typeof setSelectedOrderId === "function") {
+                                    setSelectedOrderId(ord.docId || ord.id);
+                                  }
+                                  setEditorContentPopupType(null);
+                                }}
+                                className="p-3.5 hover:bg-slate-50 transition flex items-center justify-between gap-3 cursor-pointer"
+                              >
+                                <div className="min-w-0 space-y-1">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="font-semibold text-sm text-slate-900 truncate">
+                                      {ord.title || ord.judul || ord.id || "Order Video"}
+                                    </span>
+                                    <span
+                                      className={
+                                        "px-2 py-0.5 rounded-md text-[11px] font-semibold " +
+                                        (isRev
+                                          ? "bg-rose-50 text-rose-700 border border-rose-200"
+                                          : "bg-sky-50 text-sky-700 border border-sky-200")
+                                      }
+                                    >
+                                      {stLabel}
+                                    </span>
+                                  </div>
+                                  <div className="text-xs text-slate-500 truncate">
+                                    {ord.accountName || ord.tiktokAccountName || ord.brand || "-"} •{" "}
+                                    {ord.platform || "TikTok"}
+                                    {ord.deadline ? ` • Deadline: ${ord.deadline}` : ""}
+                                  </div>
+                                </div>
+                                <span className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold shrink-0">
+                                  Kerjakan
+                                </span>
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
                   </div>
                 )}
-              </section>
+              </>
             );
           })()}
 
