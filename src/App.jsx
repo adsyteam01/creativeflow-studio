@@ -4,7 +4,8 @@ import { auth, db } from "./firebase";
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, onAuthStateChanged, signOut } from "firebase/auth";
 import { collection, doc, setDoc, addDoc, updateDoc, onSnapshot, query, orderBy, serverTimestamp, getDoc, deleteDoc } from "firebase/firestore";
 
-import { WORKFLOW_ROLES, ORDER_STATUSES, normalizeWorkflowRole, validateOrderTransition, canViewAllTiktokAccounts, canCreateTiktokAccount, canCreateOrder, canCurateOrder, canMarkPosted } from "./workflowRules.js";
+import { WORKFLOW_ROLES, ORDER_STATUSES, normalizeWorkflowRole,
+  getRoleLabel, validateOrderTransition, canViewAllTiktokAccounts, canCreateTiktokAccount, canCreateOrder, canCurateOrder, canMarkPosted } from "./workflowRules.js";
 import { dispatchWorkflowWaNotifications } from "./waWorkflowNotifier.js";
 const BRAND_LOGO_URL = "/Logo_3.jpeg";
 function isOrderVisibleToCurrentEditor(order, editorUser) {
@@ -2283,7 +2284,7 @@ function CreativeFlowApp() {
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 mb-1">Role Tim</label>
                     <select value={regRole} onChange={(e) => setRegRole(e.target.value)} className="w-full px-3.5 py-2 rounded-xl border border-slate-200 text-sm bg-white">
-                      {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                      {ROLES.map((r) => <option key={r} value={r}>{getRoleLabel(r)}</option>)}
                     </select>
                   </div>
                   <div>
@@ -2365,7 +2366,7 @@ function CreativeFlowApp() {
             </button>
             <div className="hidden md:flex flex-col items-end leading-tight">
               <span className="text-xs font-bold text-slate-800">{currentUser.name}</span>
-              <span className="text-[11px] text-sky-700 font-medium">{normalizeTeamRole(currentUser.role, "Brand Manager")}{resolveCurrentUserWhatsApp(currentUser, teamUsers) ? ` • +${resolveCurrentUserWhatsApp(currentUser, teamUsers)}` : " • Belum ada WA"}</span>
+              <span className="text-[11px] text-sky-700 font-medium">{getRoleLabel(currentUser.role)}{resolveCurrentUserWhatsApp(currentUser, teamUsers) ? ` • +${resolveCurrentUserWhatsApp(currentUser, teamUsers)}` : " • Belum ada WA"}</span>
             </div>
             <button type="button" onClick={() => signOut(auth)} className="p-2 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-600 cursor-pointer" title="Keluar"><LogOut className="w-4 h-4" /></button>
           </div>
