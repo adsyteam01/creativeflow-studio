@@ -4053,21 +4053,59 @@ function CreativeFlowApp() {
                           const active = (Array.isArray(editTtSelectedTypes) ? editTtSelectedTypes : []).includes(
                             typeName
                           );
+                          const isCustomTag =
+                            !(Array.isArray(TIKTOK_CONTENT_TYPES) ? TIKTOK_CONTENT_TYPES : []).some(
+                              (base) => String(base || "").trim().toLowerCase() === String(typeName || "").trim().toLowerCase()
+                            );
+                          const handleRemoveTag = (e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setEditTtSelectedTypes((prev) =>
+                              (Array.isArray(prev) ? prev : []).filter(
+                                (item) => String(item || "").trim().toLowerCase() !== String(typeName || "").trim().toLowerCase()
+                              )
+                            );
+                            if (isCustomTag && typeof setBrandManagerContentTypes === "function") {
+                              setBrandManagerContentTypes((prev) =>
+                                (Array.isArray(prev) ? prev : []).filter(
+                                  (item) => String(item || "").trim().toLowerCase() !== String(typeName || "").trim().toLowerCase()
+                                )
+                              );
+                            }
+                          };
                           return (
-                            <button
+                            <div
                               key={typeName}
-                              type="button"
-                              onClick={() => toggleEditTtContentType(typeName)}
                               className={
-                                "px-3 py-1.5 rounded-xl text-xs font-semibold border transition cursor-pointer " +
+                                "inline-flex items-center rounded-xl text-xs font-semibold border transition overflow-hidden " +
                                 (active
                                   ? "bg-emerald-600 text-white border-emerald-600"
                                   : "bg-white text-slate-600 border-slate-300 hover:bg-slate-50")
                               }
                             >
-                              {active ? "✓ " : "+ "}
-                              {typeName}
-                            </button>
+                              <button
+                                type="button"
+                                onClick={() => toggleEditTtContentType(typeName)}
+                                className="px-3 py-1.5 cursor-pointer flex items-center gap-1"
+                              >
+                                <span>{active ? "✓" : "+"}</span>
+                                <span>{typeName}</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={handleRemoveTag}
+                                title={"Hapus tag " + typeName}
+                                aria-label={"Hapus tag " + typeName}
+                                className={
+                                  "pr-2 pl-1 py-1.5 cursor-pointer transition leading-none " +
+                                  (active
+                                    ? "text-emerald-100 hover:text-white hover:bg-emerald-700/60"
+                                    : "text-slate-400 hover:text-rose-600 hover:bg-rose-50")
+                                }
+                              >
+                                ×
+                              </button>
+                            </div>
                           );
                         })}
                       </div>
