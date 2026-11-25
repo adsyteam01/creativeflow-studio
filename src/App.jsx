@@ -632,6 +632,7 @@ function CreativeFlowApp() {
   const [platformFilter, setPlatformFilter] = useState("Semua");
 
   const [isNewOrderOpen, setIsNewOrderOpen] = useState(false);
+  const [batchCount, setBatchCount] = useState(1);
   const [newTitle, setNewTitle] = useState("");
   const [newPlatform, setNewPlatform] = useState("TikTok");
   const [newBrief, setNewBrief] = useState("");
