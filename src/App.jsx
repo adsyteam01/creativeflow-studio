@@ -4420,6 +4420,10 @@ function CreativeFlowApp() {
                       </div>
                     )}
                   </>
+                ) : !canEditTiktokCard ? (
+                  <div className="bg-white rounded-2xl border border-slate-200 p-5 text-xs text-slate-600">
+                    Pengubahan data akun TikTok hanya tersedia untuk Brand Manager.
+                  </div>
                 ) : (
                   /* Tab Edit Akun & Jenis Konten (Khusus Brand Manager) */
                   <form

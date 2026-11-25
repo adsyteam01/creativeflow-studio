@@ -54,7 +54,11 @@ export function getRoleLabel(rawRole) {
 
 export function canViewAllTiktokAccounts(rawRole) {
   const role = normalizeWorkflowRole(rawRole);
-  return role === WORKFLOW_ROLES.BRAND_MANAGER || role === WORKFLOW_ROLES.PRODUCTION;
+  return (
+    role === WORKFLOW_ROLES.BRAND_MANAGER ||
+    role === WORKFLOW_ROLES.PRODUCTION ||
+    role === WORKFLOW_ROLES.SOCIAL_MEDIA_MANAGER
+  );
 }
 
 export function canCreateTiktokAccount(rawRole) {
