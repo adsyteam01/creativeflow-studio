@@ -2797,10 +2797,24 @@ function CreativeFlowApp() {
                     (ord) => !isReadyOrPostedOrder(ord)
                   ).length;
 
-                  const cardMetricCount = isProductionViewer ? inProductionCount : readyToPostCount;
+                  const needsReviewCount = accountOrders.filter((ord) => {
+                    if (!ord) return false;
+                    const stLow = String(ord?.status || "").trim().toLowerCase();
+                    const isPosted =
+                      Boolean(ord?.isPosted) ||
+                      Boolean(ord?.postedAt) ||
+                      stLow === "sudah diposting" ||
+                      stLow === "sudah diupload" ||
+                      stLow === "sudah di-upload" ||
+                      stLow === "terposting";
+                    const st = String(ord?.status || "").trim();
+                    return !isPosted && (st === "Review" || st === "Kurasi BM");
+                  }).length;
+
+                  const cardMetricCount = isProductionViewer ? inProductionCount : needsReviewCount;
                   const cardMetricLabel = isProductionViewer
                     ? "video dalam produksi"
-                    : "video siap posting";
+                    : "video yang harus di review";
                   const tags = sanitizeContentTypes(
                     Array.isArray(account.contentTypes) ? account.contentTypes : []
                   );
@@ -3372,37 +3386,25 @@ function CreativeFlowApp() {
                 return [...queueList, ...workingList, ...revisionList];
               }
 
+              const isNeedsBmReviewOrder = (ord) => {
+                if (!ord || isPostedOrder(ord)) return false;
+                const st = String(ord?.status || "").trim();
+                return st === "Review" || st === "Kurasi BM";
+              };
+
               if (isHistoryActive) {
                 return baseSource
                   .map((order, index) => ({ order, index }))
-                  .filter(({ order }) => order && isPostedOrder(order))
+                  .filter(({ order }) => order && !isNeedsBmReviewOrder(order))
                   .sort(compareOldestFirst)
                   .map(({ order }) => order);
               }
 
-              const reviewList = baseSource
+              return baseSource
                 .map((order, index) => ({ order, index }))
-                .filter(
-                  ({ order }) =>
-                    order &&
-                    !isPostedOrder(order) &&
-                    String(order.status || "").trim() === "Review"
-                )
+                .filter(({ order }) => isNeedsBmReviewOrder(order))
                 .sort(compareOldestFirst)
                 .map(({ order }) => order);
-
-              const readyToPostList = baseSource
-                .map((order, index) => ({ order, index }))
-                .filter(
-                  ({ order }) =>
-                    order &&
-                    !isPostedOrder(order) &&
-                    String(order.status || "").trim() === "Selesai"
-                )
-                .sort(compareOldestFirst)
-                .map(({ order }) => order);
-
-              return [...reviewList, ...readyToPostList];
             })();
 
             return (
