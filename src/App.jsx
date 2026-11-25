@@ -677,6 +677,7 @@ function CreativeFlowApp() {
   const [editTtBrandName, setEditTtBrandName] = useState("");
   const [editTtAccountName, setEditTtAccountName] = useState("");
   const [editTtSelectedTypes, setEditTtSelectedTypes] = useState([]);
+  const [removedTtTypes, setRemovedTtTypes] = useState([]);
   const [editTtCustomType, setEditTtCustomType] = useState("");
   const [isSavingTtEdit, setIsSavingTtEdit] = useState(false);
   const [isDeletingTtAccount, setIsDeletingTtAccount] = useState(false);
@@ -1179,7 +1180,8 @@ function CreativeFlowApp() {
 
       if (typeof setEditTtBrandName === "function") setEditTtBrandName(String(brandVal));
       if (typeof setEditTtAccountName === "function") setEditTtAccountName(String(accNameVal));
-      if (typeof setEditTtSelectedTypes === "function") setEditTtSelectedTypes(cleanTypes);
+      if (typeof setEditTtSelectedTypes === "function") setRemovedTtTypes([]);
+      setEditTtSelectedTypes(cleanTypes);
       const logoVal = targetAccount.logoUrl || targetAccount.brandLogo || "";
       if (typeof setEditTtBrandLogo === "function") setEditTtBrandLogo(String(logoVal));
       if (typeof setEditTtCustomType === "function") setEditTtCustomType("");
@@ -3726,12 +3728,15 @@ function CreativeFlowApp() {
           return matchesQuery && matchesStatus && matchesPlatform;
         });
 
+        const removedSet = new Set((Array.isArray(removedTtTypes) ? removedTtTypes : []).map((x) => String(x || "").trim().toLowerCase()));
         const allAvailableTypes = Array.from(
           new Map(
             sanitizeContentTypes([
               ...TIKTOK_CONTENT_TYPES,
               ...(Array.isArray(editTtSelectedTypes) ? editTtSelectedTypes : []),
-            ]).map((t) => [String(t || "").trim().toLowerCase(), String(t || "").trim()])
+            ])
+              .filter((t) => !removedSet.has(String(t || "").trim().toLowerCase()))
+              .map((t) => [String(t || "").trim().toLowerCase(), String(t || "").trim()])
           ).values()
         ).filter(Boolean);
 
@@ -4060,15 +4065,19 @@ function CreativeFlowApp() {
                           const handleRemoveTag = (e) => {
                             e.preventDefault();
                             e.stopPropagation();
+                            const targetKey = String(typeName || "").trim().toLowerCase();
+                            setRemovedTtTypes((prev) =>
+                              Array.from(new Set([...(Array.isArray(prev) ? prev : []), String(typeName || "").trim()]))
+                            );
                             setEditTtSelectedTypes((prev) =>
                               (Array.isArray(prev) ? prev : []).filter(
-                                (item) => String(item || "").trim().toLowerCase() !== String(typeName || "").trim().toLowerCase()
+                                (item) => String(item || "").trim().toLowerCase() !== targetKey
                               )
                             );
                             if (isCustomTag && typeof setBrandManagerContentTypes === "function") {
                               setBrandManagerContentTypes((prev) =>
                                 (Array.isArray(prev) ? prev : []).filter(
-                                  (item) => String(item || "").trim().toLowerCase() !== String(typeName || "").trim().toLowerCase()
+                                  (item) => String(item || "").trim().toLowerCase() !== targetKey
                                 )
                               );
                             }
