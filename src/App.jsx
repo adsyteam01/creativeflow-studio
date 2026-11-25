@@ -735,12 +735,28 @@ function CreativeFlowApp() {
     }
   };
 
+  const clearRemovedTtType = (targetName) => {
+    const key = String(targetName || "").trim().toLowerCase();
+    if (!key) return;
+    setRemovedTtTypes((prev) => {
+      const list = Array.isArray(prev) ? prev : [];
+      const next = list.filter((item) => String(item || "").trim().toLowerCase() !== key);
+      try {
+        localStorage.setItem("cf_removed_tiktok_content_types", JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
+
   const toggleEditTtContentType = (typeName) => {
     const clean = String(typeName || "").trim();
     if (!clean || typeof setEditTtSelectedTypes !== "function") return;
     setEditTtSelectedTypes((prev) => {
       const list = Array.isArray(prev) ? prev : [];
       const exists = list.some((item) => String(item || "").trim().toLowerCase() === clean.toLowerCase());
+      if (!exists) {
+        clearRemovedTtType(clean);
+      }
       const next = exists
         ? list.filter((item) => String(item || "").trim().toLowerCase() !== clean.toLowerCase())
         : [...list, clean];
@@ -761,6 +777,8 @@ function CreativeFlowApp() {
         ? sanitizeContentTypes([rawInput])[0] || String(rawInput || "").trim()
         : String(rawInput || "").trim();
     if (!cleanedCandidate) return;
+
+    clearRemovedTtType(cleanedCandidate);
 
     if (typeof setEditTtSelectedTypes === "function") {
       setEditTtSelectedTypes((prev) => {
