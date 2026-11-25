@@ -1345,7 +1345,23 @@ function CreativeFlowApp() {
       .filter(Boolean);
 
     if (accKeys.size === 0 || orderKeys.length === 0) return false;
-    return orderKeys.some((k) => accKeys.has(k));
+    if (orderKeys.some((k) => accKeys.has(k))) return true;
+
+    const compact = (v) =>
+      norm(v)
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim();
+
+    const accCompactList = Array.from(accKeys).map(compact).filter(Boolean);
+    const orderCompactList = orderKeys.map(compact).filter(Boolean);
+
+    return orderCompactList.some((ok) =>
+      accCompactList.some(
+        (ak) =>
+          (ok.length >= 3 && ak.includes(ok)) ||
+          (ak.length >= 3 && ok.includes(ak))
+      )
+    );
   };
 
   const editors = useMemo(() => {
