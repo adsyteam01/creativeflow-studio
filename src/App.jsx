@@ -690,6 +690,7 @@ function CreativeFlowApp() {
   const [isDeletingTtAccount, setIsDeletingTtAccount] = useState(false);
   const [postingOrderDocId, setPostingOrderDocId] = useState(null);
   const [isDeletingOrder, setIsDeletingOrder] = useState(false);
+  const [showRevisionInput, setShowRevisionInput] = useState(false);
   const [pendingDeleteOrder, setPendingDeleteOrder] = useState(null);
   const [accountSearchQuery, setAccountSearchQuery] = useState("");
   const [accountStatusFilter, setAccountStatusFilter] = useState("Semua");
