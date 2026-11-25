@@ -691,6 +691,7 @@ function CreativeFlowApp() {
   const [postingOrderDocId, setPostingOrderDocId] = useState(null);
   const [isDeletingOrder, setIsDeletingOrder] = useState(false);
   const [showRevisionInput, setShowRevisionInput] = useState(false);
+  const [revisionNote, setRevisionNote] = useState("");
   const [showEditorSubmitTab, setShowEditorSubmitTab] = useState(false);
   const [editorVideoUrl, setEditorVideoUrl] = useState("");
   const [pendingDeleteOrder, setPendingDeleteOrder] = useState(null);
