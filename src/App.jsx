@@ -632,6 +632,14 @@ function CreativeFlowApp() {
   const [platformFilter, setPlatformFilter] = useState("Semua");
 
   const [isNewOrderOpen, setIsNewOrderOpen] = useState(false);
+  const [newTitle, setNewTitle] = useState("");
+  const [newPlatform, setNewPlatform] = useState("TikTok");
+  const [newBrief, setNewBrief] = useState("");
+  const [newRawFootageUrl, setNewRawFootageUrl] = useState("");
+  const [newReferenceUrl, setNewReferenceUrl] = useState("");
+  const [newDeadline, setNewDeadline] = useState("");
+  const [newPriority, setNewPriority] = useState("Normal");
+  const [newAssignedEditor, setNewAssignedEditor] = useState("");
   const [selectedOrderId, setSelectedOrderId] = useState(null);
   const [showContentHistory, setShowContentHistory] = useState(false);
   const [showProductivityPanel, setShowProductivityPanel] = useState(false);
@@ -1438,7 +1446,9 @@ function CreativeFlowApp() {
   }), [orders, searchQuery, statusFilter, platformFilter, currentUser]);
 
   const normalizedRole = String((typeof currentUser !== "undefined" && currentUser?.role) || "").trim().toLowerCase();
-  const isBrandManager = normalizedRole.includes("brand manager") ||
+  const isBrandManager =
+    normalizeWorkflowRole(currentUser?.role) === WORKFLOW_ROLES.BRAND_MANAGER ||
+    normalizedRole.includes("brand manager") ||
     normalizedRole === "manager" ||
     normalizedRole === "admin" ||
     normalizedRole === "owner";
@@ -4181,7 +4191,7 @@ function CreativeFlowApp() {
                   Pilihan Jenis Konten (Bisa pilih lebih dari 1) <span className="text-rose-600">*</span>
                 </label>
                 <div className="space-y-1.5 max-h-52 overflow-y-auto p-2.5 rounded-xl border border-slate-200 bg-slate-50/70">
-                  {Array.from(new Set([...(Array.isArray(TIKTOK_CONTENT_TYPES) ? TIKTOK_CONTENT_TYPES : []), ...(Array.isArray(brandManagerContentTypes) ? brandManagerContentTypes : []), ...(Array.isArray(ttSelectedTypes) ? ttSelectedTypes : [])])).map((ct) => {
+                  {Array.from(new Set([...(Array.isArray(TIKTOK_CONTENT_TYPES) ? TIKTOK_CONTENT_TYPES : []), ...(Array.isArray(brandManagerContentTypes) ? brandManagerContentTypes : [])])).map((ct) => {
                     const checked = ttSelectedTypes.includes(ct);
                     return (
                       <label key={ct} className="flex items-center gap-2 text-xs text-slate-800 cursor-pointer py-0.5">
