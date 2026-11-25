@@ -52,6 +52,21 @@ const ROLES = [
   WORKFLOW_ROLES.EDITOR,
   WORKFLOW_ROLES.SOCIAL_MEDIA_MANAGER,
 ];
+function sanitizeContentTypes(list) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  const result = [];
+  for (const item of list) {
+    const cleaned = String(item || "").trim();
+    if (!cleaned) continue;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(cleaned);
+  }
+  return result;
+}
+
 const PLATFORMS = ["TikTok", "Instagram Reels", "YouTube Shorts"];
 
 const STATUS_CONFIG = {
