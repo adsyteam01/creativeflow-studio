@@ -41,9 +41,11 @@ const ROLE_ALIASES = {
   sosmed: WORKFLOW_ROLES.SOCIAL_MEDIA_MANAGER,
 };
 
-export function normalizeWorkflowRole(rawRole) {
+export function normalizeWorkflowRole(rawRole, fallback = WORKFLOW_ROLES.PRODUCTION) {
   const key = String(rawRole || "").trim().toLowerCase();
-  return ROLE_ALIASES[key] || WORKFLOW_ROLES.PRODUCTION;
+  if (ROLE_ALIASES[key]) return ROLE_ALIASES[key];
+  const fbKey = String(fallback || "").trim().toLowerCase();
+  return ROLE_ALIASES[fbKey] || fallback || WORKFLOW_ROLES.PRODUCTION;
 }
 
 export function getRoleLabel(rawRole) {

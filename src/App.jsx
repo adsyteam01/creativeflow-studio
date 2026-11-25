@@ -48,7 +48,7 @@ function normalizeTeamRole(rawRole, fallback = WORKFLOW_ROLES.BRAND_MANAGER) {
 
 const ROLES = [
   WORKFLOW_ROLES.BRAND_MANAGER,
-  WORKFLOW_ROLES.PRODUCTION_TEAM,
+  WORKFLOW_ROLES.PRODUCTION,
   WORKFLOW_ROLES.EDITOR,
   WORKFLOW_ROLES.SOCIAL_MEDIA_MANAGER,
 ];
@@ -68,6 +68,7 @@ function sanitizeContentTypes(list) {
 }
 
 const PLATFORMS = ["TikTok", "Instagram Reels", "YouTube Shorts"];
+const TIKTOK_CONTENT_TYPES = ["UGC", "Review", "Edukasi", "Hard Selling", "Soft Selling", "Storytelling"];
 
 const STATUS_CONFIG = {
   "Antrean": { label: "Antrean", badgeClass: "bg-sky-50 text-sky-700 border-sky-200", dotClass: "bg-sky-500" },
