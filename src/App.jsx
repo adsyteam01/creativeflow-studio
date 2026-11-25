@@ -677,7 +677,14 @@ function CreativeFlowApp() {
   const [editTtBrandName, setEditTtBrandName] = useState("");
   const [editTtAccountName, setEditTtAccountName] = useState("");
   const [editTtSelectedTypes, setEditTtSelectedTypes] = useState([]);
-  const [removedTtTypes, setRemovedTtTypes] = useState([]);
+  const [removedTtTypes, setRemovedTtTypes] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("cf_removed_tiktok_content_types") || "[]");
+      return Array.isArray(saved) ? saved : [];
+    } catch {
+      return [];
+    }
+  });
   const [editTtCustomType, setEditTtCustomType] = useState("");
   const [isSavingTtEdit, setIsSavingTtEdit] = useState(false);
   const [isDeletingTtAccount, setIsDeletingTtAccount] = useState(false);
@@ -1180,7 +1187,7 @@ function CreativeFlowApp() {
 
       if (typeof setEditTtBrandName === "function") setEditTtBrandName(String(brandVal));
       if (typeof setEditTtAccountName === "function") setEditTtAccountName(String(accNameVal));
-      if (typeof setEditTtSelectedTypes === "function") setRemovedTtTypes([]);
+      
       setEditTtSelectedTypes(cleanTypes);
       const logoVal = targetAccount.logoUrl || targetAccount.brandLogo || "";
       if (typeof setEditTtBrandLogo === "function") setEditTtBrandLogo(String(logoVal));
@@ -1212,8 +1219,14 @@ function CreativeFlowApp() {
       : Array.isArray(targetAccount?.contentTypes)
       ? targetAccount.contentTypes
       : [];
+    const removedSetSave = new Set(
+      (Array.isArray(removedTtTypes) ? removedTtTypes : []).map((x) => String(x || "").trim().toLowerCase())
+    );
+    const filteredRawTypes = (Array.isArray(rawTypes) ? rawTypes : []).filter(
+      (t) => !removedSetSave.has(String(t || "").trim().toLowerCase())
+    );
     const cleanTypes =
-      typeof sanitizeContentTypes === "function" ? sanitizeContentTypes(rawTypes) : rawTypes;
+      typeof sanitizeContentTypes === "function" ? sanitizeContentTypes(filteredRawTypes) : filteredRawTypes;
     const cleanLogo =
       typeof editTtBrandLogo !== "undefined"
         ? String(editTtBrandLogo || "").trim()
@@ -4066,9 +4079,15 @@ function CreativeFlowApp() {
                             e.preventDefault();
                             e.stopPropagation();
                             const targetKey = String(typeName || "").trim().toLowerCase();
-                            setRemovedTtTypes((prev) =>
-                              Array.from(new Set([...(Array.isArray(prev) ? prev : []), String(typeName || "").trim()]))
-                            );
+                            setRemovedTtTypes((prev) => {
+                              const next = Array.from(
+                                new Set([...(Array.isArray(prev) ? prev : []), String(typeName || "").trim()])
+                              );
+                              try {
+                                localStorage.setItem("cf_removed_tiktok_content_types", JSON.stringify(next));
+                              } catch {}
+                              return next;
+                            });
                             setEditTtSelectedTypes((prev) =>
                               (Array.isArray(prev) ? prev : []).filter(
                                 (item) => String(item || "").trim().toLowerCase() !== targetKey
