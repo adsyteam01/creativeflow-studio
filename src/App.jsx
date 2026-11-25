@@ -2789,31 +2789,57 @@ function CreativeFlowApp() {
                     return posted || ready;
                   };
 
-                  const readyToPostCount = accountOrders.filter(
-                    (ord) => ord.status === "Selesai" && !ord.isPosted
-                  ).length;
+                  const viewerRoleText = String(
+                    (typeof currentUser !== "undefined" && currentUser?.role) ||
+                      (typeof activeRole !== "undefined" ? activeRole : "") ||
+                      ""
+                  )
+                    .trim()
+                    .toLowerCase();
+                  const isSmmCardViewer =
+                    viewerRoleText.includes("sosial media") ||
+                    viewerRoleText.includes("social media") ||
+                    viewerRoleText === "smm" ||
+                    viewerRoleText === "sosmed";
+
+                  const isPostedCardOrder = (ord) => {
+                    if (!ord) return false;
+                    const stLow = String(ord?.status || "").trim().toLowerCase();
+                    return (
+                      Boolean(ord?.isPosted) ||
+                      Boolean(ord?.postedAt) ||
+                      stLow === "sudah diposting" ||
+                      stLow === "sudah diupload" ||
+                      stLow === "sudah di-upload" ||
+                      stLow === "terposting"
+                    );
+                  };
+
+                  const readyToPostCount = accountOrders.filter((ord) => {
+                    if (!ord || isPostedCardOrder(ord)) return false;
+                    const stLow = String(ord?.status || "").trim().toLowerCase();
+                    return stLow === "siap posting" || stLow === "selesai";
+                  }).length;
 
                   const inProductionCount = accountOrders.filter(
                     (ord) => !isReadyOrPostedOrder(ord)
                   ).length;
 
                   const needsReviewCount = accountOrders.filter((ord) => {
-                    if (!ord) return false;
-                    const stLow = String(ord?.status || "").trim().toLowerCase();
-                    const isPosted =
-                      Boolean(ord?.isPosted) ||
-                      Boolean(ord?.postedAt) ||
-                      stLow === "sudah diposting" ||
-                      stLow === "sudah diupload" ||
-                      stLow === "sudah di-upload" ||
-                      stLow === "terposting";
+                    if (!ord || isPostedCardOrder(ord)) return false;
                     const st = String(ord?.status || "").trim();
-                    return !isPosted && (st === "Review" || st === "Kurasi BM");
+                    return st === "Review" || st === "Kurasi BM";
                   }).length;
 
-                  const cardMetricCount = isProductionViewer ? inProductionCount : needsReviewCount;
+                  const cardMetricCount = isProductionViewer
+                    ? inProductionCount
+                    : isSmmCardViewer
+                    ? readyToPostCount
+                    : needsReviewCount;
                   const cardMetricLabel = isProductionViewer
                     ? "video dalam produksi"
+                    : isSmmCardViewer
+                    ? "video siap posting"
                     : "video yang harus di review";
                   const tags = sanitizeContentTypes(
                     Array.isArray(account.contentTypes) ? account.contentTypes : []
@@ -3281,6 +3307,11 @@ function CreativeFlowApp() {
             const isVideoEditorRole = activeRoleText.includes("editor");
             const isProductionRole =
               activeRoleText.includes("production") || activeRoleText.includes("produksi");
+            const isSmmRole =
+              activeRoleText.includes("sosial media") ||
+              activeRoleText.includes("social media") ||
+              activeRoleText === "smm" ||
+              activeRoleText === "sosmed";
 
             const isReadyToPostOrPostedForProduction = (ord) => {
               if (!ord) return false;
@@ -3384,6 +3415,28 @@ function CreativeFlowApp() {
                   .map(({ order }) => order);
 
                 return [...queueList, ...workingList, ...revisionList];
+              }
+
+              if (isSmmRole) {
+                const isReadyToPostForSmm = (ord) => {
+                  if (!ord || isPostedOrder(ord)) return false;
+                  const stLow = String(ord?.status || "").trim().toLowerCase();
+                  return stLow === "siap posting" || stLow === "selesai";
+                };
+
+                if (isHistoryActive) {
+                  return baseSource
+                    .map((order, index) => ({ order, index }))
+                    .filter(({ order }) => order && isPostedOrder(order))
+                    .sort(compareOldestFirst)
+                    .map(({ order }) => order);
+                }
+
+                return baseSource
+                  .map((order, index) => ({ order, index }))
+                  .filter(({ order }) => isReadyToPostForSmm(order))
+                  .sort(compareOldestFirst)
+                  .map(({ order }) => order);
               }
 
               const isNeedsBmReviewOrder = (ord) => {
