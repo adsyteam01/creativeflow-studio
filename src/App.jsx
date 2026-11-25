@@ -2748,9 +2748,45 @@ function CreativeFlowApp() {
                   const accountOrders = (Array.isArray(orders) ? orders : []).filter((ord) =>
                     isOrderMatchedToTiktokAccount(ord, account)
                   );
+                  const isProductionViewer = String(
+                    (typeof currentUser !== "undefined" && currentUser?.role) ||
+                      (typeof activeRole !== "undefined" ? activeRole : "") ||
+                      ""
+                  )
+                    .trim()
+                    .toLowerCase()
+                    .includes("production");
+
+                  const isReadyOrPostedOrder = (ord) => {
+                    if (!ord) return false;
+                    const stLow = String(ord?.status || "").trim().toLowerCase();
+                    const posted =
+                      Boolean(ord?.isPosted) ||
+                      Boolean(ord?.postedAt) ||
+                      stLow === "sudah diposting" ||
+                      stLow === "sudah diupload" ||
+                      stLow === "sudah di-upload" ||
+                      stLow === "terposting";
+                    const ready =
+                      stLow === "selesai" ||
+                      stLow === "siap posting" ||
+                      stLow === "kurasi bm" ||
+                      stLow === "review";
+                    return posted || ready;
+                  };
+
                   const readyToPostCount = accountOrders.filter(
                     (ord) => ord.status === "Selesai" && !ord.isPosted
                   ).length;
+
+                  const inProductionCount = accountOrders.filter(
+                    (ord) => !isReadyOrPostedOrder(ord)
+                  ).length;
+
+                  const cardMetricCount = isProductionViewer ? inProductionCount : readyToPostCount;
+                  const cardMetricLabel = isProductionViewer
+                    ? "video dalam produksi"
+                    : "video siap posting";
                   const tags = sanitizeContentTypes(
                     Array.isArray(account.contentTypes) ? account.contentTypes : []
                   );
@@ -2787,7 +2823,7 @@ function CreativeFlowApp() {
                             {account.brandName || "-"}
                           </span>
                           <span className="text-[11px] text-slate-400 shrink-0">
-                            {readyToPostCount} video siap posting
+                            {cardMetricCount} {cardMetricLabel}
                           </span>
                         </div>
 
@@ -2811,12 +2847,14 @@ function CreativeFlowApp() {
                         <span
                           className={
                             "px-2.5 py-1 rounded-md text-xs font-semibold " +
-                            (readyToPostCount > 0
-                              ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                            (cardMetricCount > 0
+                              ? (isProductionViewer
+                                  ? "bg-amber-50 text-amber-700 border border-amber-200"
+                                  : "bg-emerald-50 text-emerald-700 border border-emerald-200")
                               : "bg-slate-100 text-slate-600")
                           }
                         >
-                          {readyToPostCount} video siap posting
+                          {cardMetricCount} {cardMetricLabel}
                         </span>
 
                         <button
@@ -2911,9 +2949,35 @@ function CreativeFlowApp() {
               .trim()
               .toLowerCase();
             const isVideoEditorRole = activeRoleText.includes("editor");
+            const isProductionRole =
+              activeRoleText.includes("production") || activeRoleText.includes("produksi");
+
+            const isReadyToPostOrPostedForProduction = (ord) => {
+              if (!ord) return false;
+              if (isPostedOrder(ord)) return true;
+              const stLow = String(ord?.status || "").trim().toLowerCase();
+              return (
+                stLow === "selesai" ||
+                stLow === "siap posting" ||
+                stLow === "kurasi bm" ||
+                stLow === "review"
+              );
+            };
 
             const displayedBrandOrders = (() => {
               const isHistoryActive = typeof showContentHistory !== "undefined" && showContentHistory;
+
+              if (isProductionRole) {
+                return baseSource
+                  .map((order, index) => ({ order, index }))
+                  .filter(({ order }) => {
+                    if (!order) return false;
+                    const doneOrPosted = isReadyToPostOrPostedForProduction(order);
+                    return isHistoryActive ? doneOrPosted : !doneOrPosted;
+                  })
+                  .sort(compareOldestFirst)
+                  .map(({ order }) => order);
+              }
 
               if (isVideoEditorRole) {
                 if (isHistoryActive) {
