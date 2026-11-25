@@ -699,6 +699,7 @@ function CreativeFlowApp() {
   const [accountStatusFilter, setAccountStatusFilter] = useState("Semua");
   const [accountPlatformFilter, setAccountPlatformFilter] = useState("Semua");
   const [tiktokContentFilter, setTiktokContentFilter] = useState("Semua"); // "Semua" | "Siap Posting" | "Sudah Diposting" | "Proses"
+  const [selectedEditorContentType, setSelectedEditorContentType] = useState("Semua");
   const [brandManagerContentTypes, setBrandManagerContentTypes] = useState([]);
   const [ttBrandLogo, setTtBrandLogo] = useState("");
   const [editTtBrandLogo, setEditTtBrandLogo] = useState("");
@@ -2886,6 +2887,169 @@ function CreativeFlowApp() {
           </section>
           )}
 
+          {/* Grid Card Jenis Konten khusus Role Editor */}
+          {(() => {
+            const roleNow = String(
+              (typeof currentUser !== "undefined" && currentUser?.role) ||
+                (typeof activeRole !== "undefined" ? activeRole : "") ||
+                ""
+            )
+              .trim()
+              .toLowerCase();
+            if (!roleNow.includes("editor")) return null;
+
+            const normType = (val) =>
+              String(val || "")
+                .trim()
+                .toLowerCase();
+
+            const extractOrderTypes = (ord) => {
+              const rawList = [];
+              if (Array.isArray(ord?.contentTypes)) rawList.push(...ord.contentTypes);
+              for (const key of [
+                "contentType",
+                "jenisKonten",
+                "tipeKonten",
+                "category",
+                "contentCategory",
+              ]) {
+                if (ord && ord[key]) rawList.push(ord[key]);
+              }
+              const cleaned =
+                typeof sanitizeContentTypes === "function"
+                  ? sanitizeContentTypes(rawList)
+                  : rawList.map((x) => String(x || "").trim()).filter(Boolean);
+              return Array.from(new Set(cleaned));
+            };
+
+            const accountTypesRaw = (Array.isArray(tiktokAccounts) ? tiktokAccounts : []).flatMap(
+              (acc) => (Array.isArray(acc?.contentTypes) ? acc.contentTypes : [])
+            );
+            const cleanedAccountTypes =
+              typeof sanitizeContentTypes === "function"
+                ? sanitizeContentTypes(accountTypesRaw)
+                : accountTypesRaw.map((x) => String(x || "").trim()).filter(Boolean);
+
+            const visibleEditorOrders = (Array.isArray(orders) ? orders : []).filter((ord) => {
+              if (!ord) return false;
+              if (typeof currentUser !== "undefined" && currentUser) {
+                return isOrderVisibleToCurrentEditor(ord, currentUser);
+              }
+              return true;
+            });
+
+            const typeMap = new Map();
+            for (const t of cleanedAccountTypes) {
+              const key = normType(t);
+              if (key && !typeMap.has(key)) {
+                typeMap.set(key, { label: t, orders: [] });
+              }
+            }
+
+            for (const ord of visibleEditorOrders) {
+              const oTypes = extractOrderTypes(ord);
+              for (const t of oTypes) {
+                const key = normType(t);
+                if (!key) continue;
+                if (!typeMap.has(key)) {
+                  typeMap.set(key, { label: t, orders: [] });
+                }
+                typeMap.get(key).orders.push(ord);
+              }
+            }
+
+            const contentTypeCards = Array.from(typeMap.values());
+
+            return (
+              <section className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-baseline gap-2.5">
+                    <h2 className="text-base font-bold text-slate-900">Jenis Konten</h2>
+                    <span className="text-xs font-medium text-slate-500">
+                      {contentTypeCards.length} jenis konten
+                    </span>
+                  </div>
+                  {selectedEditorContentType !== "Semua" && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedEditorContentType("Semua")}
+                      className="text-xs font-semibold text-sky-700 hover:text-sky-800 cursor-pointer"
+                    >
+                      Tampilkan semua jenis konten
+                    </button>
+                  )}
+                </div>
+
+                {contentTypeCards.length === 0 ? (
+                  <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-6 text-center">
+                    <p className="text-sm font-semibold text-slate-700">
+                      Belum ada jenis konten terdaftar pada akun TikTok
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {contentTypeCards.map((item) => {
+                      const isSelected =
+                        normType(selectedEditorContentType) === normType(item.label);
+                      const totalOrderCount = item.orders.length;
+
+                      return (
+                        <button
+                          key={item.label}
+                          type="button"
+                          onClick={() =>
+                            setSelectedEditorContentType((prev) =>
+                              normType(prev) === normType(item.label) ? "Semua" : item.label
+                            )
+                          }
+                          className={
+                            "text-left rounded-2xl border p-5 shadow-xs transition flex flex-col justify-between gap-3 cursor-pointer " +
+                            (isSelected
+                              ? "bg-sky-50/70 border-sky-500 ring-2 ring-sky-500/20"
+                              : "bg-white border-slate-200 hover:border-slate-300")
+                          }
+                        >
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-bold text-sm text-slate-900">
+                                {item.label}
+                              </span>
+                              {isSelected && (
+                                <span className="px-2 py-0.5 rounded-md bg-sky-600 text-white text-[10px] font-semibold">
+                                  Dipilih
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-xs text-slate-500">
+                              Klik untuk memilih & memfilter order jenis konten ini
+                            </p>
+                          </div>
+
+                          <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
+                            <span
+                              className={
+                                "px-2.5 py-1 rounded-md text-xs font-semibold " +
+                                (totalOrderCount > 0
+                                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                  : "bg-slate-100 text-slate-600")
+                              }
+                            >
+                              {totalOrderCount} video order
+                            </span>
+                            <span className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700">
+                              <span>{isSelected ? "Aktif" : "Pilih"}</span>
+                              <ChevronRight className="w-3.5 h-3.5" />
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            );
+          })()}
+
           {/* Grid Daftar Order Video Utama */}
           {(() => {
             const parseOrderMs = (item) => {
@@ -2987,23 +3151,46 @@ function CreativeFlowApp() {
               }
 
               if (isVideoEditorRole) {
+                const isEditorActiveStatus = (ord) => {
+                  const st = String(ord?.status || "").trim();
+                  return st === "Antrean" || st === "Sedang Dikerjakan" || st === "Revisi";
+                };
+
+                const matchesSelectedContentType = (ord) => {
+                  if (
+                    typeof selectedEditorContentType === "undefined" ||
+                    !selectedEditorContentType ||
+                    String(selectedEditorContentType).trim().toLowerCase() === "semua"
+                  ) {
+                    return true;
+                  }
+                  const target = String(selectedEditorContentType).trim().toLowerCase();
+                  const candidateValues = [];
+                  if (Array.isArray(ord?.contentTypes)) candidateValues.push(...ord.contentTypes);
+                  for (const key of [
+                    "contentType",
+                    "jenisKonten",
+                    "tipeKonten",
+                    "category",
+                    "contentCategory",
+                  ]) {
+                    if (ord && ord[key]) candidateValues.push(ord[key]);
+                  }
+                  return candidateValues.some(
+                    (val) => String(val || "").trim().toLowerCase() === target
+                  );
+                };
+
                 if (isHistoryActive) {
-                  const readyInHistory = baseSource
+                  return baseSource
                     .map((order, index) => ({ order, index }))
                     .filter(({ order }) => {
-                      if (!order || isPostedOrder(order)) return false;
-                      return String(order.status || "").trim() === "Selesai";
+                      if (!order) return false;
+                      if (isEditorActiveStatus(order)) return false;
+                      return matchesSelectedContentType(order);
                     })
                     .sort(compareOldestFirst)
                     .map(({ order }) => order);
-
-                  const postedInHistory = baseSource
-                    .map((order, index) => ({ order, index }))
-                    .filter(({ order }) => order && isPostedOrder(order))
-                    .sort(compareOldestFirst)
-                    .map(({ order }) => order);
-
-                  return [...readyInHistory, ...postedInHistory];
                 }
 
                 const queueList = baseSource
@@ -3012,7 +3199,8 @@ function CreativeFlowApp() {
                     ({ order }) =>
                       order &&
                       !isPostedOrder(order) &&
-                      String(order.status || "").trim() === "Antrean"
+                      String(order.status || "").trim() === "Antrean" &&
+                      matchesSelectedContentType(order)
                   )
                   .sort(compareOldestFirst)
                   .map(({ order }) => order);
@@ -3023,7 +3211,8 @@ function CreativeFlowApp() {
                     ({ order }) =>
                       order &&
                       !isPostedOrder(order) &&
-                      String(order.status || "").trim() === "Sedang Dikerjakan"
+                      String(order.status || "").trim() === "Sedang Dikerjakan" &&
+                      matchesSelectedContentType(order)
                   )
                   .sort(compareOldestFirst)
                   .map(({ order }) => order);
@@ -3034,7 +3223,8 @@ function CreativeFlowApp() {
                     ({ order }) =>
                       order &&
                       !isPostedOrder(order) &&
-                      String(order.status || "").trim() === "Revisi"
+                      String(order.status || "").trim() === "Revisi" &&
+                      matchesSelectedContentType(order)
                   )
                   .sort(compareOldestFirst)
                   .map(({ order }) => order);
