@@ -3418,7 +3418,7 @@ function CreativeFlowApp() {
               }
 
               if (isSmmRole) {
-                const isReadyToPostForSmm = (ord) => {
+                const isSmmReadyToPost = (ord) => {
                   if (!ord || isPostedOrder(ord)) return false;
                   const stLow = String(ord?.status || "").trim().toLowerCase();
                   return stLow === "siap posting" || stLow === "selesai";
@@ -3434,7 +3434,7 @@ function CreativeFlowApp() {
 
                 return baseSource
                   .map((order, index) => ({ order, index }))
-                  .filter(({ order }) => isReadyToPostForSmm(order))
+                  .filter(({ order }) => isSmmReadyToPost(order))
                   .sort(compareOldestFirst)
                   .map(({ order }) => order);
               }
