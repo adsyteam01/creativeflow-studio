@@ -3418,8 +3418,18 @@ function CreativeFlowApp() {
               }
 
               if (isSmmRole) {
+                const isReviewStageForSmm = (ord) => {
+                  const stLow = String(ord?.status || "").trim().toLowerCase();
+                  return (
+                    stLow === "review" ||
+                    stLow === "kurasi bm" ||
+                    stLow === "perlu review" ||
+                    stLow.includes("review")
+                  );
+                };
+
                 const isSmmReadyToPost = (ord) => {
-                  if (!ord || isPostedOrder(ord)) return false;
+                  if (!ord || isPostedOrder(ord) || isReviewStageForSmm(ord)) return false;
                   const stLow = String(ord?.status || "").trim().toLowerCase();
                   return stLow === "siap posting" || stLow === "selesai";
                 };
@@ -3639,26 +3649,57 @@ function CreativeFlowApp() {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {displayedBrandOrders.map((ord) => {
-                  const isReadyToPost = ord.status === "Selesai" && !ord.isPosted;
-                  const isPostedDone = ord.status === "Selesai" && Boolean(ord.isPosted);
+                  const stLowCard = String(ord?.status || "").trim().toLowerCase();
+                  const isPostedCard =
+                    Boolean(ord?.isPosted) ||
+                    Boolean(ord?.postedAt) ||
+                    stLowCard === "sudah diposting" ||
+                    stLowCard === "sudah diupload" ||
+                    stLowCard === "sudah di-upload" ||
+                    stLowCard === "terposting";
+                  const isReadyToPostCard =
+                    !isPostedCard &&
+                    stLowCard !== "review" &&
+                    stLowCard !== "kurasi bm" &&
+                    !stLowCard.includes("review") &&
+                    (stLowCard === "siap posting" || stLowCard === "selesai");
                   const baseStCfg = STATUS_CONFIG[ord.status] || {
                     label: ord.status || "Antrean",
                     badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
                     dotClass: "bg-slate-500",
                   };
-                  const stCfg = isReadyToPost
+                  const stCfg = isSmmRole
+                    ? isPostedCard
+                      ? {
+                          label: "Terposting",
+                          badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
+                          dotClass: "bg-slate-500",
+                        }
+                      : isReadyToPostCard
+                      ? {
+                          label: "Siap Posting",
+                          badgeClass: "bg-emerald-50 text-emerald-700 border-emerald-200",
+                          dotClass: "bg-emerald-500",
+                        }
+                      : baseStCfg
+                    : isReadyToPostCard
                     ? {
                         label: "Siap Posting",
                         badgeClass: "bg-emerald-50 text-emerald-700 border-emerald-200",
                         dotClass: "bg-emerald-500",
                       }
-                    : isPostedDone
+                    : isPostedCard
                     ? {
                         label: "Terposting",
                         badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
                         dotClass: "bg-slate-500",
                       }
                     : baseStCfg;
+                  const cardBorderClass = isSmmRole
+                    ? isPostedCard
+                      ? "bg-white rounded-2xl border border-slate-200 p-5 shadow-xs hover:border-slate-300 transition flex flex-col justify-between gap-3 cursor-pointer"
+                      : "bg-white rounded-2xl border border-emerald-200/80 p-5 shadow-xs hover:border-emerald-400 transition flex flex-col justify-between gap-3 cursor-pointer"
+                    : "bg-white rounded-2xl border border-slate-200 p-5 shadow-xs hover:border-sky-300 transition flex flex-col justify-between gap-3 cursor-pointer";
                   return (
                     <div
                       key={ord.docId || ord.id}
@@ -3667,11 +3708,17 @@ function CreativeFlowApp() {
                         if (typeof setShowRevisionInput === "function") setShowRevisionInput(false);
                         if (typeof setSelectedOrderId === "function") setSelectedOrderId(ord.docId || ord.id);
                       }}
-                      className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs hover:border-sky-300 transition flex flex-col justify-between gap-3 cursor-pointer"
+                      className={cardBorderClass}
                     >
                       <div className="space-y-2">
                         <div className="flex items-center justify-between gap-2">
-                          <span className="text-[11px] font-bold text-sky-700 bg-sky-50 px-2 py-0.5 rounded-md">
+                          <span className={
+                            isSmmRole
+                              ? isPostedCard
+                                ? "text-[11px] font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-md"
+                                : "text-[11px] font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-md"
+                              : "text-[11px] font-bold text-sky-700 bg-sky-50 px-2 py-0.5 rounded-md"
+                          }>
                             {ord.id || "ORDER"}
                           </span>
                           <span className={"inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-0.5 rounded-full border " + stCfg.badgeClass}>
@@ -3684,7 +3731,9 @@ function CreativeFlowApp() {
                       </div>
                       <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
                         <span>{ord.contentType || ord.type || "Konten"}</span>
-                        <span className="font-semibold text-sky-700">Detail →</span>
+                        <span className={isSmmRole && !isPostedCard ? "font-semibold text-emerald-700" : "font-semibold text-sky-700"}>
+                          {isSmmRole && !isPostedCard ? "Posting →" : "Detail →"}
+                        </span>
                       </div>
                     </div>
                   );
