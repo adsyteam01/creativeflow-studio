@@ -2532,55 +2532,125 @@ function CreativeFlowApp() {
             const st = String(ord?.status || "").trim();
             return st === "Sedang Dikerjakan" || st === "Revisi";
           }).length;
-          const reviewOrReadyCount = allOrders.filter((ord) => {
+          const summaryRoleText = String(
+            (typeof currentUser !== "undefined" && currentUser?.role) ||
+              (typeof activeRole !== "undefined" ? activeRole : "") ||
+              ""
+          )
+            .trim()
+            .toLowerCase();
+          const isSmmSummaryViewer =
+            summaryRoleText.includes("sosial media") ||
+            summaryRoleText.includes("social media") ||
+            summaryRoleText === "smm" ||
+            summaryRoleText === "sosmed";
+
+          const reviewOnlyCount = allOrders.filter((ord) => {
             if (isPostedItem(ord)) return false;
             const st = String(ord?.status || "").trim();
-            return st === "Kurasi BM" || st === "Review" || st === "Siap Posting" || st === "Selesai";
+            return st === "Kurasi BM" || st === "Review";
           }).length;
+          const readyOnlyCount = allOrders.filter((ord) => {
+            if (isPostedItem(ord)) return false;
+            const st = String(ord?.status || "").trim();
+            return st === "Siap Posting" || st === "Selesai";
+          }).length;
+          const reviewOrReadyCount = reviewOnlyCount + readyOnlyCount;
           const alreadyPostedCount = allOrders.filter((ord) => isPostedItem(ord)).length;
 
-          const summaryCardsConfig = [
-            {
-              key: "total",
-              title: "Total Order",
-              count: totalOrderCount,
-              cardClass: "bg-white p-4 rounded-2xl border border-slate-200/80 hover:border-slate-400 transition text-left cursor-pointer",
-              labelClass: "text-xs font-medium text-slate-500",
-              valueClass: "text-2xl font-bold text-slate-900 mt-1",
-            },
-            {
-              key: "queue",
-              title: "Dalam Antrean",
-              count: queueCount,
-              cardClass: "bg-white p-4 rounded-2xl border border-sky-200 hover:border-sky-400 transition text-left cursor-pointer",
-              labelClass: "text-xs font-medium text-sky-700",
-              valueClass: "text-2xl font-bold text-sky-800 mt-1",
-            },
-            {
-              key: "work_revision",
-              title: "Dikerjakan / Revisi",
-              count: workOrRevisionCount,
-              cardClass: "bg-white p-4 rounded-2xl border border-amber-200 hover:border-amber-400 transition text-left cursor-pointer",
-              labelClass: "text-xs font-medium text-amber-700",
-              valueClass: "text-2xl font-bold text-amber-800 mt-1",
-            },
-            {
-              key: "review_ready",
-              title: "Review / Siap Posting",
-              count: reviewOrReadyCount,
-              cardClass: "bg-white p-4 rounded-2xl border border-emerald-200 hover:border-emerald-400 transition text-left cursor-pointer",
-              labelClass: "text-xs font-medium text-emerald-700",
-              valueClass: "text-2xl font-bold text-emerald-800 mt-1",
-            },
-            {
-              key: "posted",
-              title: "Sudah Posting",
-              count: alreadyPostedCount,
-              cardClass: "bg-white p-4 rounded-2xl border border-violet-200 hover:border-violet-400 transition text-left cursor-pointer",
-              labelClass: "text-xs font-medium text-violet-700",
-              valueClass: "text-2xl font-bold text-violet-800 mt-1",
-            },
-          ];
+          const summaryCardsConfig = isSmmSummaryViewer
+            ? [
+                {
+                  key: "total",
+                  title: "Total Order",
+                  count: totalOrderCount,
+                  cardClass: "bg-white p-4 rounded-2xl border border-slate-200/80 hover:border-slate-400 transition text-left cursor-pointer",
+                  labelClass: "text-xs font-medium text-slate-500",
+                  valueClass: "text-2xl font-bold text-slate-900 mt-1",
+                },
+                {
+                  key: "queue",
+                  title: "Dalam Antrean",
+                  count: queueCount,
+                  cardClass: "bg-white p-4 rounded-2xl border border-sky-200 hover:border-sky-400 transition text-left cursor-pointer",
+                  labelClass: "text-xs font-medium text-sky-700",
+                  valueClass: "text-2xl font-bold text-sky-800 mt-1",
+                },
+                {
+                  key: "work_revision",
+                  title: "Dikerjakan / Revisi",
+                  count: workOrRevisionCount,
+                  cardClass: "bg-white p-4 rounded-2xl border border-amber-200 hover:border-amber-400 transition text-left cursor-pointer",
+                  labelClass: "text-xs font-medium text-amber-700",
+                  valueClass: "text-2xl font-bold text-amber-800 mt-1",
+                },
+                {
+                  key: "review_only",
+                  title: "Review",
+                  count: reviewOnlyCount,
+                  cardClass: "bg-white p-4 rounded-2xl border border-teal-200 hover:border-teal-400 transition text-left cursor-pointer",
+                  labelClass: "text-xs font-medium text-teal-700",
+                  valueClass: "text-2xl font-bold text-teal-800 mt-1",
+                },
+                {
+                  key: "ready_only",
+                  title: "Siap Posting",
+                  count: readyOnlyCount,
+                  cardClass: "bg-white p-4 rounded-2xl border border-emerald-200 hover:border-emerald-400 transition text-left cursor-pointer",
+                  labelClass: "text-xs font-medium text-emerald-700",
+                  valueClass: "text-2xl font-bold text-emerald-800 mt-1",
+                },
+                {
+                  key: "posted",
+                  title: "Sudah Posting",
+                  count: alreadyPostedCount,
+                  cardClass: "bg-white p-4 rounded-2xl border border-violet-200 hover:border-violet-400 transition text-left cursor-pointer",
+                  labelClass: "text-xs font-medium text-violet-700",
+                  valueClass: "text-2xl font-bold text-violet-800 mt-1",
+                },
+              ]
+            : [
+                {
+                  key: "total",
+                  title: "Total Order",
+                  count: totalOrderCount,
+                  cardClass: "bg-white p-4 rounded-2xl border border-slate-200/80 hover:border-slate-400 transition text-left cursor-pointer",
+                  labelClass: "text-xs font-medium text-slate-500",
+                  valueClass: "text-2xl font-bold text-slate-900 mt-1",
+                },
+                {
+                  key: "queue",
+                  title: "Dalam Antrean",
+                  count: queueCount,
+                  cardClass: "bg-white p-4 rounded-2xl border border-sky-200 hover:border-sky-400 transition text-left cursor-pointer",
+                  labelClass: "text-xs font-medium text-sky-700",
+                  valueClass: "text-2xl font-bold text-sky-800 mt-1",
+                },
+                {
+                  key: "work_revision",
+                  title: "Dikerjakan / Revisi",
+                  count: workOrRevisionCount,
+                  cardClass: "bg-white p-4 rounded-2xl border border-amber-200 hover:border-amber-400 transition text-left cursor-pointer",
+                  labelClass: "text-xs font-medium text-amber-700",
+                  valueClass: "text-2xl font-bold text-amber-800 mt-1",
+                },
+                {
+                  key: "review_ready",
+                  title: "Review / Siap Posting",
+                  count: reviewOrReadyCount,
+                  cardClass: "bg-white p-4 rounded-2xl border border-emerald-200 hover:border-emerald-400 transition text-left cursor-pointer",
+                  labelClass: "text-xs font-medium text-emerald-700",
+                  valueClass: "text-2xl font-bold text-emerald-800 mt-1",
+                },
+                {
+                  key: "posted",
+                  title: "Sudah Posting",
+                  count: alreadyPostedCount,
+                  cardClass: "bg-white p-4 rounded-2xl border border-violet-200 hover:border-violet-400 transition text-left cursor-pointer",
+                  labelClass: "text-xs font-medium text-violet-700",
+                  valueClass: "text-2xl font-bold text-violet-800 mt-1",
+                },
+              ];
 
           const parseCardOrderMs = (item) => {
             const raw = item?.createdAt ?? item?.timestamp ?? item?.updatedAt ?? item?.postedAt ?? null;
@@ -2608,6 +2678,10 @@ function CreativeFlowApp() {
                 if (activeCardCfg.key === "queue") return !posted && st === "Antrean";
                 if (activeCardCfg.key === "work_revision")
                   return !posted && (st === "Sedang Dikerjakan" || st === "Revisi");
+                if (activeCardCfg.key === "review_only")
+                  return !posted && (st === "Kurasi BM" || st === "Review");
+                if (activeCardCfg.key === "ready_only")
+                  return !posted && (st === "Siap Posting" || st === "Selesai");
                 if (activeCardCfg.key === "review_ready")
                   return !posted && (st === "Kurasi BM" || st === "Review" || st === "Siap Posting" || st === "Selesai");
                 if (activeCardCfg.key === "posted") return posted;
@@ -2637,9 +2711,13 @@ function CreativeFlowApp() {
             return filtered;
           })();
 
+          const summaryGridClass = isSmmSummaryViewer
+            ? "grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4"
+            : "grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4";
+
           return (
             <>
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+              <div className={summaryGridClass}>
                 {summaryCardsConfig.map((card) => (
                   <button
                     key={card.key}
