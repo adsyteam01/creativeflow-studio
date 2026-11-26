@@ -97,7 +97,6 @@ export function canMarkPosted(rawRole) {
   const role = normalizeWorkflowRole(rawRole);
   return (
     role === WORKFLOW_ROLES.SOCIAL_MEDIA_MANAGER ||
-    role === WORKFLOW_ROLES.BRAND_MANAGER ||
     role === WORKFLOW_ROLES.PUBLISHER
   );
 }
@@ -142,7 +141,7 @@ export function validateOrderTransition({ actorRole, currentStatus, nextStatus, 
     return { ok: false, reason: "Hanya Brand Manager yang dapat menetapkan status Siap Posting." };
   }
   if (to === ORDER_STATUSES.POSTED && !canMarkPosted(role)) {
-    return { ok: false, reason: "Hanya Publisher, Sosial Media Manager, atau Brand Manager yang dapat menandai order sebagai Sudah Diposting." };
+    return { ok: false, reason: "Hanya Publisher atau Sosial Media Manager yang dapat menandai order sebagai Sudah Diposting." };
   }
   return { ok: true, role, from, to };
 }
