@@ -3,6 +3,7 @@ export const WORKFLOW_ROLES = {
   EDITOR: "editor",
   BRAND_MANAGER: "brand_manager",
   SOCIAL_MEDIA_MANAGER: "social_media_manager",
+  PUBLISHER: "publisher",
 };
 
 export const ROLE_LABELS = {
@@ -10,6 +11,7 @@ export const ROLE_LABELS = {
   [WORKFLOW_ROLES.EDITOR]: "Editor",
   [WORKFLOW_ROLES.BRAND_MANAGER]: "Brand Manager",
   [WORKFLOW_ROLES.SOCIAL_MEDIA_MANAGER]: "Sosial Media Manager",
+  [WORKFLOW_ROLES.PUBLISHER]: "Publisher",
 };
 
 export const ORDER_STATUSES = {
@@ -39,6 +41,9 @@ const ROLE_ALIASES = {
   "sosial media manager": WORKFLOW_ROLES.SOCIAL_MEDIA_MANAGER,
   smm: WORKFLOW_ROLES.SOCIAL_MEDIA_MANAGER,
   sosmed: WORKFLOW_ROLES.SOCIAL_MEDIA_MANAGER,
+  publisher: WORKFLOW_ROLES.PUBLISHER,
+  pub: WORKFLOW_ROLES.PUBLISHER,
+  penerbit: WORKFLOW_ROLES.PUBLISHER,
 };
 
 export function normalizeWorkflowRole(rawRole, fallback = WORKFLOW_ROLES.PRODUCTION) {
@@ -57,7 +62,8 @@ export function canViewAllTiktokAccounts(rawRole) {
   return (
     role === WORKFLOW_ROLES.BRAND_MANAGER ||
     role === WORKFLOW_ROLES.PRODUCTION ||
-    role === WORKFLOW_ROLES.SOCIAL_MEDIA_MANAGER
+    role === WORKFLOW_ROLES.SOCIAL_MEDIA_MANAGER ||
+    role === WORKFLOW_ROLES.PUBLISHER
   );
 }
 
@@ -89,7 +95,11 @@ export function canCurateOrder(rawRole) {
 
 export function canMarkPosted(rawRole) {
   const role = normalizeWorkflowRole(rawRole);
-  return role === WORKFLOW_ROLES.SOCIAL_MEDIA_MANAGER || role === WORKFLOW_ROLES.BRAND_MANAGER;
+  return (
+    role === WORKFLOW_ROLES.SOCIAL_MEDIA_MANAGER ||
+    role === WORKFLOW_ROLES.BRAND_MANAGER ||
+    role === WORKFLOW_ROLES.PUBLISHER
+  );
 }
 
 const ALLOWED_TRANSITIONS = {
@@ -132,7 +142,7 @@ export function validateOrderTransition({ actorRole, currentStatus, nextStatus, 
     return { ok: false, reason: "Hanya Brand Manager yang dapat menetapkan status Siap Posting." };
   }
   if (to === ORDER_STATUSES.POSTED && !canMarkPosted(role)) {
-    return { ok: false, reason: "Hanya Sosial Media Manager atau Brand Manager yang dapat menandai order sebagai Sudah Diposting." };
+    return { ok: false, reason: "Hanya Publisher, Sosial Media Manager, atau Brand Manager yang dapat menandai order sebagai Sudah Diposting." };
   }
   return { ok: true, role, from, to };
 }
