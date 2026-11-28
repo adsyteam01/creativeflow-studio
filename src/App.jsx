@@ -2,11 +2,25 @@ import React, { useState, useEffect, useMemo } from "react";
 import { Plus, Search, Clock, AlertCircle, Play, Pause, Volume2, VolumeX, Download, Bell, Film, LogOut, X, Smartphone, ChevronRight, Database, CheckCircle2, RotateCcw, Send, Wrench, Eye, EyeOff, Trash2 } from "lucide-react";
 import { auth, db } from "./firebase";
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, onAuthStateChanged, signOut } from "firebase/auth";
-import { collection, doc, setDoc, addDoc, updateDoc, onSnapshot, query, orderBy, serverTimestamp, getDoc, deleteDoc } from "firebase/firestore";
+import { collection, doc, setDoc, addDoc, updateDoc, onSnapshot, query, orderBy, serverTimestamp, getDoc, getDocs, deleteDoc } from "firebase/firestore";
 
 import { WORKFLOW_ROLES, ORDER_STATUSES, normalizeWorkflowRole,
-  getRoleLabel, validateOrderTransition, canViewAllTiktokAccounts, canCreateTiktokAccount, canCreateOrder, canCurateOrder, canMarkPosted } from "./workflowRules.js";
+  getRoleLabel, validateOrderTransition, canViewAllTiktokAccounts, canCreateTiktokAccount, canEditTiktokCard, canCreateOrder, canCurateOrder, canMarkPosted } from "./workflowRules.js";
 import { dispatchWorkflowWaNotifications } from "./waWorkflowNotifier.js";
+import PostingSchedulePanel, { ScheduleFormModal, OrderScheduleInfoCard, isOrderPostedStatus, isOrderReadyToPostStatus } from "./PostingSchedulePanel.jsx";
+const sendWorkflowWaViaApi = async ({ phone, message }) => {
+  const cleanPhone = String(phone || "").replace(/[^0-9]/g, "");
+  if (!cleanPhone) return;
+  const res = await fetch("/api/send-wa", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ phone: cleanPhone, message }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    throw new Error(data?.error || `HTTP ${res.status}`);
+  }
+};
 const BRAND_LOGO_URL = "/Logo_3.jpeg";
 function isOrderVisibleToCurrentEditor(order, editorUser) {
   if (!order || !editorUser) return false;
@@ -521,6 +535,7 @@ function CreativeFlowApp() {
   const [currentUser, setCurrentUser] = useState(null);
   const [newContentType, setNewContentType] = useState("");
   const [newBrand, setNewBrand] = useState("");
+  const [selectedOrderAccounts, setSelectedOrderAccounts] = useState([]);
   const [editWaNumber, setEditWaNumber] = useState("");
   const [authLoading, setAuthLoading] = useState(true);
   const [authMode, setAuthMode] = useState("login");
@@ -563,9 +578,38 @@ function CreativeFlowApp() {
       unsubscribe = onSnapshot(
         logsQuery,
         (snapshot) => {
+          const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+          const cutoffMs = Date.now() - SEVEN_DAYS_MS;
+          const expiredDocIds = [];
+
+          const resolveLogTimestampMs = (data = {}, fallbackId = "") => {
+            if (typeof data?.createdAtMs === "number" && Number.isFinite(data.createdAtMs) && data.createdAtMs > 0) {
+              return data.createdAtMs;
+            }
+            if (typeof data?.createdAt?.toMillis === "function") {
+              const ms = data.createdAt.toMillis();
+              if (Number.isFinite(ms) && ms > 0) return ms;
+            }
+            if (typeof data?.createdAt === "string" || data?.createdAt instanceof Date) {
+              const parsed = new Date(data.createdAt).getTime();
+              if (Number.isFinite(parsed) && parsed > 0) return parsed;
+            }
+            const idMatch = String(data?.id || fallbackId || "").match(/^wa_(d{10,})_/);
+            if (idMatch) {
+              const ms = Number(idMatch[1]);
+              if (Number.isFinite(ms) && ms > 0) return ms;
+            }
+            return null;
+          };
+
           const remoteItems = [];
           snapshot.forEach((docSnap) => {
             const data = docSnap.data() || {};
+            const tsMs = resolveLogTimestampMs(data, docSnap.id);
+            if (tsMs !== null && tsMs < cutoffMs) {
+              expiredDocIds.push(docSnap.id);
+              return;
+            }
             const item = { id: data.id || docSnap.id, docId: docSnap.id, ...data };
             if (data?.event === "Orderan Baru Masuk Antrean") {
               if (import.meta.env.DEV) console.debug("[CF_WA_DEBUG]", {
@@ -580,6 +624,11 @@ function CreativeFlowApp() {
               remoteItems.push(item);
             }
           });
+          if (expiredDocIds.length > 0 && typeof deleteDoc === "function" && typeof doc === "function") {
+            Promise.allSettled(
+              expiredDocIds.map((expiredId) => deleteDoc(doc(db, "waLogs", expiredId)))
+            ).catch(() => {});
+          }
           remoteItems.sort((a, b) => (Number(b?.createdAtMs || b?.createdAt?.toMillis?.() || 0) - Number(a?.createdAtMs || a?.createdAt?.toMillis?.() || 0)));
           const deduped = [];
           const seen = new Set();
@@ -695,6 +744,7 @@ function CreativeFlowApp() {
   const [showEditorSubmitTab, setShowEditorSubmitTab] = useState(false);
   const [editorVideoUrl, setEditorVideoUrl] = useState("");
   const [pendingDeleteOrder, setPendingDeleteOrder] = useState(null);
+  const [scheduleModalState, setScheduleModalState] = useState({ isOpen: false, mode: "create", targetOrder: null, isSaving: false });
   const [accountSearchQuery, setAccountSearchQuery] = useState("");
   const [accountStatusFilter, setAccountStatusFilter] = useState("Semua");
   const [accountPlatformFilter, setAccountPlatformFilter] = useState("Semua");
@@ -705,6 +755,9 @@ function CreativeFlowApp() {
   const [ttBrandLogo, setTtBrandLogo] = useState("");
   const [editTtBrandLogo, setEditTtBrandLogo] = useState("");
   const [isAddTiktokModalOpen, setIsAddTiktokModalOpen] = useState(false);
+  const [publisherOrderTab, setPublisherOrderTab] = useState("ready");
+  const [publisherAccountPopup, setPublisherAccountPopup] = useState(null);
+  const [publisherSummaryPopup, setPublisherSummaryPopup] = useState(null);
   const [ttBrandName, setTtBrandName] = useState("");
   const [ttAccountName, setTtAccountName] = useState("");
   const [ttSelectedTypes, setTtSelectedTypes] = useState([]);
@@ -948,8 +1001,15 @@ function CreativeFlowApp() {
         postUrl: order.postUrl || order.publishedUrl || "",
         sendFn: async ({ phone, message }) => {
           const cleanPhone = String(phone || "").replace(/[^0-9]/g, "");
-          if (cleanPhone && typeof window !== "undefined") {
-            console.debug("[WA_POSTED_COMPLETED]", { phone: cleanPhone, message });
+          if (!cleanPhone) return;
+          const res = await fetch("/api/send-wa", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ phone: cleanPhone, message }),
+          });
+          const payload = await res.json().catch(() => ({}));
+          if (!res.ok || payload?.ok === false) {
+            throw new Error(payload?.error || `HTTP ${res.status}`);
           }
         },
       });
@@ -978,39 +1038,97 @@ function CreativeFlowApp() {
   };
 
 
-  const handleApproveComplete = async () => {
-    if (!selectedOrder || !selectedOrder.docId) return;
+  const applyReadyToPostWithSchedule = async (targetOrd, scheduleData = {}) => {
+    if (!targetOrd || !targetOrd.docId) return;
     if (!canCurateOrder(currentUser?.role)) return;
     const nextStatus = ORDER_STATUSES.READY_TO_POST;
-    await updateDoc(doc(db, "orders", selectedOrder.docId), {
+    const scheduledDate = String(scheduleData.scheduledDate || "").trim();
+    const scheduledTime = String(scheduleData.scheduledTime || "").trim();
+    const scheduledCaption = String(scheduleData.scheduledCaption || "").trim();
+    const scheduledAt = scheduledDate
+      ? new Date(`${scheduledDate}T${scheduledTime || "10:00"}:00`).toISOString()
+      : "";
+
+    const patchFields = {
       status: nextStatus,
       curatedAt: typeof serverTimestamp === "function" ? serverTimestamp() : new Date().toISOString(),
-    });
-    try {
-      await dispatchWorkflowWaNotifications({
-        eventType: "ready_to_post",
-        order: { ...selectedOrder, status: nextStatus },
-        teamMembers: typeof teamUsers !== "undefined" ? teamUsers : [],
-        actor: typeof currentUser !== "undefined" ? currentUser : {},
-        videoUrl: selectedOrder.videoUrl || selectedOrder.resultUrl || "",
-        note: selectedOrder.brief || "",
-        sendFn: async ({ phone, message }) => {
-          const cleanPhone = String(phone || "").replace(/[^0-9]/g, "");
-          if (cleanPhone && typeof window !== "undefined") {
-            console.debug("[WA_READY_TO_POST]", { phone: cleanPhone, message });
-          }
-        },
-      });
-    } catch (waErr) {
-      console.warn("Gagal mengirim notifikasi WA siap posting:", waErr);
-    }
-    const editorTarget = selectedOrder.assignedEditor || selectedOrder.creatorName || "Video Editor";
+      scheduledDate,
+      scheduledTime,
+      scheduledCaption,
+      scheduledAt,
+    };
 
-    const bmTarget = String(
-      selectedOrder.creatorName || selectedOrder.requestedBy || selectedOrder.requestedByEmail || ""
-    ).trim();
-    if (bmTarget) {
+    await updateDoc(doc(db, "orders", targetOrd.docId), patchFields);
+
+    if (typeof setOrders === "function") {
+      setOrders((prev) =>
+        (Array.isArray(prev) ? prev : []).map((item) => {
+          const match =
+            (targetOrd.docId && item.docId === targetOrd.docId) ||
+            (targetOrd.id && item.id === targetOrd.id);
+          return match ? { ...item, ...patchFields } : item;
+        })
+      );
     }
+    if (typeof setSelectedOrder === "function") {
+      setSelectedOrder((prev) =>
+        prev && ((targetOrd.docId && prev.docId === targetOrd.docId) || (targetOrd.id && prev.id === targetOrd.id))
+          ? { ...prev, ...patchFields }
+          : prev
+      );
+    }
+  };
+
+  const handleSaveScheduleUpdate = async ({ scheduledDate, scheduledTime, scheduledCaption }) => {
+    if (!(Boolean(isBrandManager || (typeof canCurateOrder === "function" && canCurateOrder(currentUser?.role))))) return;
+    const targetOrd = scheduleModalState.targetOrder || selectedOrder;
+    if (!targetOrd || !targetOrd.docId) return;
+    setScheduleModalState((prev) => ({ ...prev, isSaving: true }));
+    try {
+      const scheduledAt = scheduledDate
+        ? new Date(`${scheduledDate}T${scheduledTime || "10:00"}:00`).toISOString()
+        : "";
+      const patchFields = {
+        scheduledDate,
+        scheduledTime,
+        scheduledCaption,
+        scheduledAt,
+      };
+      await updateDoc(doc(db, "orders", targetOrd.docId), patchFields);
+      if (typeof setOrders === "function") {
+        setOrders((prev) =>
+          (Array.isArray(prev) ? prev : []).map((item) => {
+            const match =
+              (targetOrd.docId && item.docId === targetOrd.docId) ||
+              (targetOrd.id && item.id === targetOrd.id);
+            return match ? { ...item, ...patchFields } : item;
+          })
+        );
+      }
+      if (typeof setSelectedOrder === "function") {
+        setSelectedOrder((prev) =>
+          prev && ((targetOrd.docId && prev.docId === targetOrd.docId) || (targetOrd.id && prev.id === targetOrd.id))
+            ? { ...prev, ...patchFields }
+            : prev
+        );
+      }
+      setScheduleModalState({ isOpen: false, mode: "create", targetOrder: null, isSaving: false });
+    } catch (err) {
+      console.error("Gagal menyimpan jadwal posting:", err);
+      alert(err?.message || "Gagal menyimpan jadwal posting.");
+      setScheduleModalState((prev) => ({ ...prev, isSaving: false }));
+    }
+  };
+
+  const handleApproveComplete = () => {
+    if (!selectedOrder || !selectedOrder.docId) return;
+    if (!canCurateOrder(currentUser?.role)) return;
+    setScheduleModalState({
+      isOpen: true,
+      mode: "create",
+      targetOrder: selectedOrder,
+      isSaving: false,
+    });
   };
 
   const handleSaveMyWhatsApp = async (e) => {
@@ -1414,6 +1532,7 @@ function CreativeFlowApp() {
       roleStr === "owner";
     const edRole = roleStr.includes("editor");
     const smmRole = roleStr.includes("sosial media") || roleStr.includes("social media") || roleStr === "smm" || roleStr === "sosmed";
+    const pubRole = roleStr.includes("publisher") || roleStr === "pub" || roleStr === "penerbit";
 
     return list.filter((order) => {
       if (!order) return false;
@@ -1448,10 +1567,10 @@ function CreativeFlowApp() {
         const isEditorQueueOrRevision =
           st === "Antrean" || st === "Sedang Dikerjakan" || st === "Revisi";
         if (!isEditorQueueOrRevision) return false;
-      } else if (smmRole) {
-        const isSmmPublishQueue =
+      } else if (smmRole || pubRole) {
+        const isPublishQueue =
           st === "Siap Posting" || st === "Selesai" || st === "Sudah Diposting" || isAlreadyPosted;
-        if (!isSmmPublishQueue) return false;
+        if (!isPublishQueue) return false;
       }
 
       const matchesSearch =
@@ -1526,10 +1645,16 @@ function CreativeFlowApp() {
     const rawOrders = Array.isArray(orders) ? orders : [];
     const roleStr = String(currentUser?.role || "").trim().toLowerCase();
     const isAdminOrOwner = roleStr === "admin" || roleStr === "owner";
+    const normalizedCurrentRole =
+      typeof normalizeWorkflowRole === "function"
+        ? normalizeWorkflowRole(currentUser?.role, "")
+        : roleStr;
     const isBmUser =
+      normalizedCurrentRole === WORKFLOW_ROLES.BRAND_MANAGER ||
       roleStr.includes("brand manager") ||
       roleStr.includes("brand management") ||
-      roleStr === "manager";
+      roleStr === "manager" ||
+      roleStr === "bm";
     const isEditorUser = roleStr.includes("editor");
 
     const myUid = String(currentUser?.uid || currentUser?.id || "").trim().toLowerCase();
@@ -1567,12 +1692,13 @@ function CreativeFlowApp() {
       );
     };
 
-    const scopedOrders = isAdminOrOwner
-      ? rawOrders
+    const canViewAllTeamProductivity = isAdminOrOwner || isBmUser;
+
+    const scopedOrders = canViewAllTeamProductivity
+      ? rawOrders.filter(Boolean)
       : rawOrders.filter((order) => {
           if (!order) return false;
-          if (isBmUser && !isEditorUser) return matchesCurrentBm(order);
-          if (isEditorUser && !isBmUser) return matchesCurrentEditor(order);
+          if (isEditorUser) return matchesCurrentEditor(order);
           return matchesCurrentBm(order) || matchesCurrentEditor(order);
         });
 
@@ -1602,25 +1728,88 @@ function CreativeFlowApp() {
 
     const editorMap = new Map();
     const bmMap = new Map();
+    const productionMap = new Map();
+    const publisherMap = new Map();
 
     const ensureBucket = (map, key, label, roleLabel) => {
       const cleanKey = String(key || "").trim().toLowerCase();
-      if (!cleanKey) return null;
-      if (!map.has(cleanKey)) {
-        map.set(cleanKey, {
-          key: cleanKey,
-          name: String(label || key).trim(),
+      const cleanLabel = String(label || key || "").trim();
+      const canonicalKey = (cleanLabel || cleanKey).toLowerCase();
+      if (!canonicalKey) return null;
+
+      let existing = map.get(canonicalKey) || null;
+
+      if (!existing) {
+        for (const bucket of map.values()) {
+          const bNameKey = String(bucket?.name || "").trim().toLowerCase();
+          const bKey = String(bucket?.key || "").trim().toLowerCase();
+          if (bNameKey === canonicalKey || bKey === canonicalKey || (cleanKey && bKey === cleanKey)) {
+            existing = bucket;
+            break;
+          }
+        }
+      }
+
+      if (!existing) {
+        existing = {
+          key: canonicalKey,
+          name: cleanLabel || cleanKey,
           role: roleLabel,
           total: 0,
           queue: 0,
           inProgress: 0,
           review: 0,
           revision: 0,
+          readyToPost: 0,
+          posted: 0,
           completed: 0,
-        });
+        };
+        map.set(canonicalKey, existing);
+      } else if (
+        cleanLabel &&
+        !cleanLabel.includes("@") &&
+        (String(existing.name || "").includes("@") ||
+          String(existing.name || "").trim().toLowerCase() === String(existing.key || "").trim().toLowerCase())
+      ) {
+        existing.name = cleanLabel;
       }
-      return map.get(cleanKey);
+
+      return existing;
     };
+
+    const resolveMemberRoleLabel = (rawRole) => {
+      const norm =
+        typeof normalizeWorkflowRole === "function"
+          ? normalizeWorkflowRole(rawRole, "")
+          : String(rawRole || "").trim().toLowerCase();
+      if (norm === WORKFLOW_ROLES.PRODUCTION) return "Team Produksi";
+      if (norm === WORKFLOW_ROLES.EDITOR) return "Video Editor";
+      if (norm === WORKFLOW_ROLES.PUBLISHER) return "Publisher";
+      if (norm === WORKFLOW_ROLES.BRAND_MANAGER) return "Brand Management";
+      return String(rawRole || "").trim();
+    };
+
+    const getBucketMapByRoleLabel = (roleLabel) => {
+      if (roleLabel === "Team Produksi") return productionMap;
+      if (roleLabel === "Video Editor") return editorMap;
+      if (roleLabel === "Publisher") return publisherMap;
+      return bmMap;
+    };
+
+    if (canViewAllTeamProductivity && Array.isArray(teamUsers)) {
+      teamUsers.forEach((member) => {
+        if (!member) return;
+        const roleLabel = resolveMemberRoleLabel(member?.role);
+        if (!["Team Produksi", "Video Editor", "Brand Management", "Publisher"].includes(roleLabel)) {
+          return;
+        }
+        const mLabel = String(member?.name || member?.fullName || member?.email || "").trim();
+        const mKey = String(member?.uid || member?.id || member?.email || mLabel).trim();
+        if (mKey) {
+          ensureBucket(getBucketMapByRoleLabel(roleLabel), mKey, mLabel || mKey, roleLabel);
+        }
+      });
+    }
 
     const applyStatusCount = (bucket, order) => {
       if (!bucket) return;
@@ -1632,9 +1821,13 @@ function CreativeFlowApp() {
         st.toLowerCase() === "sudah diupload";
 
       bucket.total += 1;
-      if (st === "Selesai" || posted) {
+      if (posted) {
+        bucket.posted += 1;
         bucket.completed += 1;
-      } else if (st === "Review") {
+      } else if (st === "Siap Posting" || st === "Selesai") {
+        bucket.readyToPost += 1;
+        bucket.completed += 1;
+      } else if (st === "Review" || st === "Kurasi BM") {
         bucket.review += 1;
       } else if (st === "Revisi") {
         bucket.revision += 1;
@@ -1646,11 +1839,22 @@ function CreativeFlowApp() {
     };
 
     filteredByPeriod.forEach((order) => {
-      const bmLabel = String(order?.requestedBy || order?.requestedByEmail || "").trim();
-      const bmKey = String(order?.requestedByUid || order?.requestedByEmail || bmLabel).trim();
-      if (bmKey && (!isEditorUser || isAdminOrOwner)) {
-        const bmBucket = ensureBucket(bmMap, bmKey, bmLabel || bmKey, "Brand Management");
-        applyStatusCount(bmBucket, order);
+      const reqRoleLabel = resolveMemberRoleLabel(order?.requestedByRole || order?.creatorRole || "");
+      const reqLabel = String(order?.requestedBy || order?.requestedByEmail || "").trim();
+      const reqKey = String(order?.requestedByUid || order?.requestedByEmail || reqLabel).trim();
+      let reqBucket = null;
+      if (reqKey && (!isEditorUser || canViewAllTeamProductivity)) {
+        const targetRole = reqRoleLabel === "Team Produksi" ? "Team Produksi" : "Brand Management";
+        const targetMap = getBucketMapByRoleLabel(targetRole);
+        reqBucket = ensureBucket(targetMap, reqKey, reqLabel || reqKey, targetRole);
+        applyStatusCount(reqBucket, order);
+      }
+
+      const prodLabel = String(order?.productionName || order?.assignedProduction || "").trim();
+      const prodKey = String(order?.productionUid || order?.productionEmail || prodLabel).trim();
+      if (prodKey && canViewAllTeamProductivity) {
+        const prodBucket = ensureBucket(productionMap, prodKey, prodLabel || prodKey, "Team Produksi");
+        applyStatusCount(prodBucket, order);
       }
 
       const edLabel = String(
@@ -1659,23 +1863,136 @@ function CreativeFlowApp() {
       const edKey = String(
         order?.assignedEditorUid || order?.assignedEditorEmail || edLabel
       ).trim();
-      if (edKey && (!isBmUser || isAdminOrOwner)) {
-        const edBucket = ensureBucket(editorMap, edKey, edLabel || edKey, "Video Editor");
-        applyStatusCount(edBucket, order);
+      const canCountEditorCard =
+        canViewAllTeamProductivity || (isEditorUser && matchesCurrentEditor(order));
+      if (canCountEditorCard) {
+        const selfLabel = String(
+          currentUser?.name || currentUser?.fullName || currentUser?.email || ""
+        ).trim();
+        const selfKey = String(
+          currentUser?.uid || currentUser?.id || currentUser?.email || selfLabel
+        ).trim();
+        const resolvedEdLabel = edLabel || (!canViewAllTeamProductivity ? selfLabel : "");
+        const resolvedEdKey = edKey || (!canViewAllTeamProductivity ? selfKey : "");
+        if (resolvedEdKey || resolvedEdLabel) {
+          const edBucket = ensureBucket(
+            editorMap,
+            resolvedEdKey || resolvedEdLabel,
+            resolvedEdLabel || resolvedEdKey,
+            "Video Editor"
+          );
+          applyStatusCount(edBucket, order);
+        }
+      }
+
+      const stNow = String(order?.status || "").trim();
+      const isBmReviewStage = stNow === "Review" || stNow === "Kurasi BM";
+      if (isBmReviewStage && canViewAllTeamProductivity) {
+        const bmReviewerLabel = String(
+          order?.reviewedBy || order?.bmName || order?.curatedBy || ""
+        ).trim();
+        const bmReviewerKey = String(
+          order?.reviewedByUid || order?.bmUid || order?.bmEmail || bmReviewerLabel
+        ).trim();
+
+        if (bmReviewerKey || bmReviewerLabel) {
+          const specificBmBucket = ensureBucket(
+            bmMap,
+            bmReviewerKey || bmReviewerLabel,
+            bmReviewerLabel || bmReviewerKey,
+            "Brand Management"
+          );
+          if (specificBmBucket && specificBmBucket !== reqBucket) {
+            specificBmBucket.review += 1;
+          }
+        } else if (bmMap.size > 0) {
+          for (const bmBucket of bmMap.values()) {
+            if (bmBucket && bmBucket !== reqBucket) {
+              bmBucket.review += 1;
+            }
+          }
+        }
+      }
+
+      const pubLabel = String(order?.postedBy || order?.publisherName || "").trim();
+      const pubKey = String(order?.postedByUid || order?.publisherEmail || pubLabel).trim();
+      const isOrderPostedOrReady =
+        Boolean(order?.isPosted) ||
+        Boolean(order?.postedAt) ||
+        String(order?.status || "").trim() === "Siap Posting" ||
+        String(order?.status || "").trim() === "Selesai";
+      if (canViewAllTeamProductivity && isOrderPostedOrReady) {
+        if (pubKey) {
+          const pubBucket = ensureBucket(publisherMap, pubKey, pubLabel || pubKey, "Publisher");
+          applyStatusCount(pubBucket, order);
+        } else if (publisherMap.size > 0) {
+          const firstPubBucket = Array.from(publisherMap.values())[0] || null;
+          if (firstPubBucket) {
+            applyStatusCount(firstPubBucket, order);
+          }
+        }
       }
     });
 
     const q = String(productivitySearch || "").trim().toLowerCase();
-    const combined = [
-      ...(productivityRoleFilter === "Brand Management" ? [] : Array.from(editorMap.values())),
-      ...(productivityRoleFilter === "Video Editor" ? [] : Array.from(bmMap.values())),
-    ]
+    const rawRoleBuckets = [
+      ...Array.from(productionMap.values()),
+      ...Array.from(editorMap.values()),
+      ...Array.from(bmMap.values()),
+      ...Array.from(publisherMap.values()),
+    ];
+
+    const mergedByNameAndRole = new Map();
+    rawRoleBuckets.forEach((item) => {
+      if (!item) return;
+      const nameNorm = String(item.name || item.key || "").trim().toLowerCase();
+      const roleNorm = String(item.role || "").trim().toLowerCase();
+      const mergeKey = `${roleNorm}::${nameNorm}`;
+      if (!mergedByNameAndRole.has(mergeKey)) {
+        mergedByNameAndRole.set(mergeKey, {
+          ...item,
+          key: mergeKey,
+          name: String(item.name || item.key || "").trim(),
+        });
+      } else {
+        const prev = mergedByNameAndRole.get(mergeKey);
+        prev.total += Number(item.total) || 0;
+        prev.queue += Number(item.queue) || 0;
+        prev.inProgress += Number(item.inProgress) || 0;
+        prev.review += Number(item.review) || 0;
+        prev.revision += Number(item.revision) || 0;
+        prev.readyToPost += Number(item.readyToPost) || 0;
+        prev.posted += Number(item.posted) || 0;
+        prev.completed += Number(item.completed) || 0;
+      }
+    });
+
+    const allRoleBuckets = Array.from(mergedByNameAndRole.values());
+    const combined = allRoleBuckets
+      .filter((item) =>
+        productivityRoleFilter === "Semua" ? true : item.role === productivityRoleFilter
+      )
       .filter((item) => (!q ? true : item.name.toLowerCase().includes(q)))
       .map((item) => {
         const rate = item.total > 0 ? Math.round((item.completed / item.total) * 100) : 0;
         return { ...item, completionRate: rate };
       })
-      .sort((a, b) => b.completed - a.completed || b.total - a.total || a.name.localeCompare(b.name));
+      .sort((a, b) => {
+        const getRoleRank = (roleStr) => {
+          const r = String(roleStr || "").trim().toLowerCase();
+          if (r.includes("produks")) return 0;
+          if (r.includes("editor")) return 1;
+          if (r === "bm" || r.includes("brand")) return 2;
+          if (r.includes("publish")) return 3;
+          return 4;
+        };
+        return (
+          getRoleRank(a.role) - getRoleRank(b.role) ||
+          b.completed - a.completed ||
+          b.total - a.total ||
+          String(a.name || "").localeCompare(String(b.name || ""))
+        );
+      });
 
     const summary = filteredByPeriod.reduce(
       (acc, order) => {
@@ -1686,22 +2003,32 @@ function CreativeFlowApp() {
           st.toLowerCase() === "sudah diposting" ||
           st.toLowerCase() === "sudah diupload";
         acc.total += 1;
-        if (st === "Selesai" || posted) acc.completed += 1;
-        else if (st === "Review") acc.review += 1;
-        else if (st === "Revisi") acc.revision += 1;
-        else acc.active += 1;
+        if (posted) {
+          acc.posted += 1;
+          acc.completed += 1;
+        } else if (st === "Siap Posting" || st === "Selesai") {
+          acc.readyToPost += 1;
+          acc.completed += 1;
+        } else if (st === "Review" || st === "Kurasi BM") {
+          acc.review += 1;
+        } else if (st === "Revisi") {
+          acc.revision += 1;
+        } else {
+          acc.active += 1;
+        }
         return acc;
       },
-      { total: 0, completed: 0, review: 0, revision: 0, active: 0 }
+      { total: 0, completed: 0, readyToPost: 0, posted: 0, review: 0, revision: 0, active: 0 }
     );
 
     return {
       isAdminOrOwner,
+      canViewAllTeam: canViewAllTeamProductivity,
       rows: combined,
       summary,
       completionRate: summary.total > 0 ? Math.round((summary.completed / summary.total) * 100) : 0,
     };
-  }, [orders, currentUser, productivityRange, productivityRoleFilter, productivitySearch]);
+  }, [orders, currentUser, teamUsers, productivityRange, productivityRoleFilter, productivitySearch]);
 
   useEffect(() => {
     let active = true;
@@ -1925,6 +2252,26 @@ function CreativeFlowApp() {
     );
   }, [matchedOrderTiktokAccount]);
 
+  const parseNumberedTitles = (rawText) => {
+    const text = String(rawText || "").trim();
+    if (!text) return [];
+    const normalized = text.replace(/\r\n/g, "\n");
+    const matches = [...normalized.matchAll(/(?:^|[\n,\s]+)(\d+)[.)]\s+([\s\S]*?)(?=(?:[\n,\s]+\d+[.)]\s+)|$)/g)];
+    if (matches.length >= 2) {
+      return matches
+        .map((m) => String(m[2] || "").replace(/[\s,;]+$/g, "").trim())
+        .filter(Boolean);
+    }
+    const lineItems = normalized
+      .split("\n")
+      .map((line) => line.replace(/^\s*\d+[.)]\s*/, "").trim())
+      .filter(Boolean);
+    if (lineItems.length >= 2) {
+      return lineItems;
+    }
+    return [text.replace(/^\d+[.)]\s*/, "").trim()].filter(Boolean);
+  };
+
   const handleCreateOrder = async (e) => {
     if (import.meta.env.DEV) console.info("[CF_SUBMIT] handleCreateOrder terpanggil", { newBrand, newTitle, windowLock: typeof window !== "undefined" ? window.__cfCreatingOrder : null });
     if (e && typeof e.preventDefault === "function") e.preventDefault();
@@ -1936,74 +2283,146 @@ function CreativeFlowApp() {
     const releaseOrderLock = () => {
       if (typeof window !== "undefined") window.__cfCreatingOrder = false;
     };
-    const cleanBrand = String(typeof newBrand !== "undefined" ? newBrand : "").trim();
+    const rawSelected = Array.isArray(selectedOrderAccounts)
+      ? selectedOrderAccounts.map((a) => String(a || "").trim()).filter(Boolean)
+      : [];
+    const fallbackSingle = String(typeof newBrand !== "undefined" ? newBrand : "").trim();
+    const targetAccounts = Array.from(
+      new Set(rawSelected.length > 0 ? rawSelected : fallbackSingle ? [fallbackSingle] : [])
+    );
+
+    const accountsList = Array.isArray(tiktokAccounts) ? tiktokAccounts : [];
+    const findAccountObj = (accName) =>
+      accountsList.find(
+        (acc) =>
+          String(acc?.accountName || "").trim().toLowerCase() === String(accName || "").trim().toLowerCase() ||
+          String(acc?.brandName || "").trim().toLowerCase() === String(accName || "").trim().toLowerCase()
+      );
+
+    const getAccountTypes = (accName) => {
+      const found = findAccountObj(accName);
+      const rawTypes =
+        typeof sanitizeContentTypes === "function"
+          ? sanitizeContentTypes(found?.contentTypes)
+          : Array.isArray(found?.contentTypes)
+          ? found.contentTypes
+          : [];
+      return (Array.isArray(rawTypes) ? rawTypes : [])
+        .map((t) => String(t || "").trim())
+        .filter(Boolean);
+    };
+
     const rawTitle = String(typeof newTitle !== "undefined" ? newTitle : "").trim();
+    const parsedTitles = parseNumberedTitles(rawTitle);
     const cleanType = String(
       typeof newContentType !== "undefined" && newContentType
         ? newContentType
         : ((Array.isArray(orderModalContentTypes) && orderModalContentTypes[0]) || ""),
       "",
     ).trim();
-    const cleanTitle = rawTitle || (cleanBrand ? cleanBrand + " - " + cleanType : "");
 
-    if (!cleanBrand || !cleanTitle) {
-      alert("Pilih akun TikTok terdaftar dan isi judul order terlebih dahulu.");
-      releaseOrderLock(); return;
+    if (targetAccounts.length === 0 || !rawTitle) {
+      alert("Pilih minimal 1 akun TikTok terdaftar dan isi judul order terlebih dahulu.");
+      releaseOrderLock();
+      return;
+    }
+
+    if (cleanType && targetAccounts.length > 1) {
+      const hasTypeMismatch = targetAccounts.some((accName) => {
+        const types = getAccountTypes(accName);
+        if (types.length === 0) return false;
+        return !types.some((t) => t.toLowerCase() === cleanType.toLowerCase());
+      });
+      if (hasTypeMismatch) {
+        alert("Semua akun yang dipilih harus mendukung jenis konten yang sama.");
+        releaseOrderLock();
+        return;
+      }
     }
 
     const rawCount = Number(typeof batchCount !== "undefined" ? batchCount : 1);
     const totalBatch = Number.isFinite(rawCount)
       ? Math.min(20, Math.max(1, Math.floor(rawCount)))
       : 1;
-    const batchId = totalBatch > 1 ? "BATCH-" + Date.now() : "";
-    const baseOrderId = "ORD-" + Date.now();
+    const batchGroupId = totalBatch > 1 || targetAccounts.length > 1 ? "BATCH-" + Date.now() : "";
     const createdOrders = [];
 
     try {
-      for (let idx = 0; idx < totalBatch; idx += 1) {
-        const itemNumber = idx + 1;
-        const itemTitle =
-          totalBatch > 1 ? `[${itemNumber}/${totalBatch}] ${cleanTitle}` : cleanTitle;
+      for (let accIdx = 0; accIdx < targetAccounts.length; accIdx += 1) {
+        const accName = targetAccounts[accIdx];
+        const foundAcc = findAccountObj(accName);
+        const accBrand = String(foundAcc?.brandName || fallbackSingle || accName).trim();
+        const cleanTitle = rawTitle || (accBrand ? accBrand + " - " + cleanType : "");
+        const perAccountBatchId = totalBatch > 1 ? `BATCH-${Date.now()}-${accIdx + 1}` : "";
+        const baseOrderId = `ORD-${Date.now()}-${accIdx + 1}`;
 
-        const itemOrder = {
-          id: totalBatch > 1 ? `${baseOrderId}-${itemNumber}` : baseOrderId,
-          batchId,
-          batchIndex: totalBatch > 1 ? itemNumber : 1,
-          batchTotal: totalBatch,
-          title: itemTitle,
-          baseTitle: cleanTitle,
-          brand: cleanBrand,
-          accountName: cleanBrand,
-          platform: "TikTok",
-          contentType: cleanType,
-          type: cleanType,
-          brief: String(typeof newBrief !== "undefined" ? newBrief : "").trim(),
-          rawFootageUrl: String(typeof newRawFootageUrl !== "undefined" ? newRawFootageUrl : "").trim(),
-          referenceUrl: String(typeof newReferenceUrl !== "undefined" ? newReferenceUrl : "").trim(),
-          deadline: String(typeof newDeadline !== "undefined" ? newDeadline : "").trim(),
-          priority: String(typeof newPriority !== "undefined" && newPriority ? newPriority : "Normal").trim(),
-          assignedEditor: String(typeof newAssignedEditor !== "undefined" ? newAssignedEditor : "").trim(),
-          status: "Antrean",
-          isPosted: false,
-          requestedByUid: currentUser?.uid || currentUser?.id || "",
-          requestedByEmail: String(currentUser?.email || "").trim().toLowerCase(),
-          requestedBy: currentUser?.name || currentUser?.email || "Brand Manager",
-          requestedByRole: currentUser?.role || "Brand Manager",
-          createdAt: new Date().toISOString(),
-        };
+        for (let idx = 0; idx < totalBatch; idx += 1) {
+          const itemNumber = idx + 1;
+          const hasNumberedList = parsedTitles.length > 1;
+          const numberedTitleForItem = hasNumberedList
+            ? parsedTitles[idx] || parsedTitles[parsedTitles.length - 1] || cleanTitle
+            : "";
+          const itemTitle = hasNumberedList
+            ? numberedTitleForItem
+            : totalBatch > 1
+            ? `[${itemNumber}/${totalBatch}] ${cleanTitle}`
+            : cleanTitle;
 
-        if (typeof db !== "undefined" && typeof addDoc === "function" && typeof collection === "function") {
-          const docRef = await addDoc(collection(db, "orders"), itemOrder);
-          itemOrder.docId = docRef.id;
-          if (import.meta.env.DEV) console.info("[CF_ORDER_SAVED] tersimpan ke Firestore orders:", docRef.id, itemOrder.id);
+          const itemOrder = {
+            id: totalBatch > 1 ? `${baseOrderId}-${itemNumber}` : baseOrderId,
+            batchId: perAccountBatchId,
+            batchGroupId,
+            batchIndex: totalBatch > 1 ? itemNumber : 1,
+            batchTotal: totalBatch,
+            title: itemTitle,
+            baseTitle: cleanTitle,
+            brand: accName,
+            brandCategory: accBrand,
+            contentCategory: cleanType,
+            accountName: accName,
+            platform: "TikTok",
+            contentType: cleanType,
+            type: cleanType,
+            brief: String(typeof newBrief !== "undefined" ? newBrief : "").trim(),
+            rawFootageUrl: String(typeof newRawFootageUrl !== "undefined" ? newRawFootageUrl : "").trim(),
+            referenceUrl: String(typeof newReferenceUrl !== "undefined" ? newReferenceUrl : "").trim(),
+            deadline: String(typeof newDeadline !== "undefined" ? newDeadline : "").trim(),
+            priority: String(typeof newPriority !== "undefined" && newPriority ? newPriority : "Normal").trim(),
+            assignedEditor: String(typeof newAssignedEditor !== "undefined" ? newAssignedEditor : "").trim(),
+            status: "Antrean",
+            isPosted: false,
+            requestedByUid: currentUser?.uid || currentUser?.id || "",
+            requestedByEmail: String(currentUser?.email || "").trim().toLowerCase(),
+            requestedBy: currentUser?.name || currentUser?.email || "Brand Manager",
+            requestedByRole: currentUser?.role || "Brand Manager",
+            createdAt: new Date().toISOString(),
+          };
+
+          if (typeof db !== "undefined" && typeof addDoc === "function" && typeof collection === "function") {
+            const docRef = await addDoc(collection(db, "orders"), itemOrder);
+            itemOrder.docId = docRef.id;
+            if (import.meta.env.DEV) console.info("[CF_ORDER_SAVED] tersimpan ke Firestore orders:", docRef.id, itemOrder.id);
+          }
+          createdOrders.push(itemOrder);
         }
-        createdOrders.push(itemOrder);
       }
 
       const newOrderItem = createdOrders[0] || null;
       if (!newOrderItem) return;
 
+      for (const createdItem of createdOrders) {
+        await dispatchWorkflowWaNotifications({
+          eventType: "order_created",
+          order: createdItem,
+          teamMembers: typeof teamUsers !== "undefined" ? teamUsers : [],
+          actor: typeof currentUser !== "undefined" ? currentUser : {},
+          note: createdItem.brief || "",
+          sendFn: sendWorkflowWaViaApi,
+        });
+      }
+
       if (typeof setNewTitle === "function") setNewTitle("");
+      setSelectedOrderAccounts([]);
       if (typeof setBatchCount === "function") setBatchCount(1);
       if (typeof setNewContentType === "function") setNewContentType("");
       if (typeof setNewBrief === "function") setNewBrief("");
@@ -2064,16 +2483,44 @@ function CreativeFlowApp() {
           })
         );
       }
-      const eventMap = {
-        [ORDER_STATUSES.IN_PROGRESS]: "job_assigned",
-        [ORDER_STATUSES.BM_CURATION]: "submitted_for_curation",
-        [ORDER_STATUSES.REVISION]: "revision_requested",
-        [ORDER_STATUSES.READY_TO_POST]: "ready_to_post",
-        [ORDER_STATUSES.POSTED]: "posted_completed",
-      };
-      const waEventType = eventMap[normalizedNext];
+      const reviewerFields =
+      normalizedNext === ORDER_STATUSES.REVISION
+        ? {
+            reviewedBy: currentUser?.name || currentUser?.email || "",
+            reviewedByUid: currentUser?.uid || currentUser?.id || "",
+            reviewedByEmail: String(currentUser?.email || "").trim().toLowerCase(),
+          }
+        : {};
+      const finalPayload = { ...payload, ...reviewerFields };
+      if (
+        finalPayload !== payload &&
+        typeof db !== "undefined" &&
+        typeof doc === "function" &&
+        typeof updateDoc === "function" &&
+        targetId
+      ) {
+        await updateDoc(doc(db, "orders", String(targetId)), reviewerFields);
+      }
+
+      const prevStatus = String(orderObj?.status || "").trim();
+      let waEventType = "";
+      if (normalizedNext === ORDER_STATUSES.IN_PROGRESS) {
+        waEventType = "work_started";
+      } else if (normalizedNext === ORDER_STATUSES.BM_CURATION) {
+        waEventType =
+          prevStatus === ORDER_STATUSES.REVISION
+            ? "revision_completed"
+            : "ready_for_review";
+      } else if (normalizedNext === ORDER_STATUSES.REVISION) {
+        waEventType = "revision_requested";
+      } else if (normalizedNext === ORDER_STATUSES.READY_TO_POST) {
+        waEventType = "ready_to_post";
+      } else if (normalizedNext === ORDER_STATUSES.POSTED) {
+        waEventType = "posted_completed";
+      }
+
       if (waEventType) {
-        const mergedOrder = { ...orderObj, ...payload };
+        const mergedOrder = { ...orderObj, ...finalPayload };
         const membersList = typeof teamUsers !== "undefined" ? teamUsers : [];
         const actorObj = typeof currentUser !== "undefined" ? currentUser : {};
         await dispatchWorkflowWaNotifications({
@@ -2081,19 +2528,25 @@ function CreativeFlowApp() {
           order: mergedOrder,
           teamMembers: membersList,
           actor: actorObj,
-          videoUrl: payload.videoUrl || payload.previewUrl || mergedOrder.videoUrl || "",
-          note: payload.revisionNote || payload.note || mergedOrder.revisionNote || mergedOrder.brief || "",
-          postUrl: payload.postUrl || payload.publishedUrl || mergedOrder.postUrl || "",
-          sendFn: async ({ phone, message }) => {
-            const res = await fetch("/api/send-wa", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ phone, message }),
-            });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          },
+          videoUrl:
+            finalPayload.videoUrl ||
+            finalPayload.previewUrl ||
+            mergedOrder.videoUrl ||
+            "",
+          note:
+            finalPayload.revisionNote ||
+            finalPayload.note ||
+            mergedOrder.revisionNote ||
+            mergedOrder.brief ||
+            "",
+          postUrl:
+            finalPayload.postUrl ||
+            finalPayload.publishedUrl ||
+            mergedOrder.postUrl ||
+            "",
+          sendFn: sendWorkflowWaViaApi,
         });
-      }
+    }
     } catch (err) {
       console.error("Gagal memperbarui status order:", err);
       alert(err?.message || "Gagal memperbarui status order.");
@@ -2120,22 +2573,6 @@ function CreativeFlowApp() {
     };
     if (typeof handleOrderStatusTransition === "function") {
       await handleOrderStatusTransition(target, nextStatus, claimPayload);
-    }
-
-        if (target.docId && typeof db !== "undefined" && typeof updateDoc === "function" && typeof doc === "function") {
-      try {
-        await updateDoc(doc(db, "orders", target.docId), {
-          status: nextStatus,
-          assignedEditor: editorLabel,
-          assignedEditorEmail: editorEmailVal,
-          assignedEditorUid: editorUidVal,
-          claimedBy: editorLabel,
-          claimedByEmail: editorEmailVal,
-          claimedByUid: editorUidVal,
-        });
-      } catch (err) {
-        console.error("Gagal mengunci job ke editor:", err);
-      }
     }
   };
 
@@ -2384,22 +2821,79 @@ function CreativeFlowApp() {
   const confirmDeleteVideoOrder = async () => {
     const target = pendingDeleteOrder;
     if (!target) return;
-    const targetDocId = target.docId || target.id;
+    const targetDocId = String(target.docId || target.id || "").trim();
+    const orderCode = String(target.id || "").trim().toLowerCase();
+    const orderTitle = String(target.title || "").trim().toLowerCase();
+    const candidateIds = new Set(
+      [targetDocId, target.docId, target.id]
+        .map((v) => String(v || "").trim().toLowerCase())
+        .filter(Boolean)
+    );
+
+    const isOrderRelatedWaLog = (data = {}) => {
+      const refIds = [
+        data?.orderId,
+        data?.orderDocId,
+        data?.orderCode,
+        data?.orderNumber,
+      ]
+        .map((v) => String(v || "").trim().toLowerCase())
+        .filter(Boolean);
+      if (refIds.some((rid) => candidateIds.has(rid))) return true;
+
+      const msgLower = String(data?.message || "").toLowerCase();
+      if (!msgLower) return false;
+      if (orderCode && msgLower.includes(orderCode)) return true;
+      if (orderTitle && orderTitle.length >= 4 && msgLower.includes(orderTitle)) return true;
+      return false;
+    };
+
     if (typeof setIsDeletingOrder === "function") setIsDeletingOrder(true);
     try {
-      if (targetDocId && typeof db !== "undefined") {
-        await deleteDoc(doc(db, "orders", String(targetDocId)));
+      if (targetDocId && typeof db !== "undefined" && db) {
+        await deleteDoc(doc(db, "orders", targetDocId));
+
+        try {
+          if (typeof getDocs === "function" && typeof collection === "function") {
+            const waSnap = await getDocs(collection(db, "waLogs"));
+            const deletePromises = [];
+            waSnap.forEach((logSnap) => {
+              const logData = logSnap.data() || {};
+              if (isOrderRelatedWaLog(logData)) {
+                deletePromises.push(deleteDoc(doc(db, "waLogs", logSnap.id)));
+              }
+            });
+            if (deletePromises.length > 0) {
+              await Promise.allSettled(deletePromises);
+            }
+          }
+        } catch (logErr) {
+          console.warn("Pembersihan waLogs terkait orderan melewati kendala:", logErr?.message || logErr);
+        }
       }
+
+      if (typeof setWaLogs === "function") {
+        setWaLogs((prev) => {
+          const next = (Array.isArray(prev) ? prev : []).filter((item) => !isOrderRelatedWaLog(item));
+          if (typeof currentUser !== "undefined" && currentUser && typeof saveAccountWaStorage === "function") {
+            try {
+              saveAccountWaStorage("cf_wa_logs", currentUser, next);
+            } catch {}
+          }
+          return next;
+        });
+      }
+
       if (typeof setOrders === "function") {
         setOrders((prev) =>
           (Array.isArray(prev) ? prev : []).filter(
-            (item) => (item?.docId || item?.id) !== targetDocId
+            (item) => String(item?.docId || item?.id || "").trim() !== targetDocId
           )
         );
       }
       if (typeof setPendingDeleteOrder === "function") setPendingDeleteOrder(null);
       if (typeof setSelectedOrderId === "function") {
-        setSelectedOrderId((curr) => (curr === targetDocId ? null : curr));
+        setSelectedOrderId((curr) => (String(curr || "").trim() === targetDocId ? null : curr));
       }
     } catch (err) {
       console.error("Gagal menghapus orderan video:", err);
@@ -2410,2550 +2904,3761 @@ function CreativeFlowApp() {
   };
 
   return (
-    <>
-    <div className="min-h-screen bg-slate-50 text-slate-800" style={{ backgroundImage: "linear-gradient(135deg, rgba(186, 230, 253, 0.45) 0%, rgba(240, 249, 255, 0.75) 50%, rgba(253, 230, 138, 0.42) 100%)" }}>
-      <header className="sticky top-0 z-30 bg-white/95 border-b border-sky-100">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3 min-w-0">
-            <BrandLogo sizeClass="w-10 h-10" />
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="font-bold text-base text-slate-900 truncate">CreativeFlow Studio</span>
-                <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-100 text-amber-800 border border-amber-200">9:16 Vertical</span>
-              </div>
-              <p className="text-[11px] text-slate-500 truncate">Portal Order & Antrean Edit Video Sosial Media Tim</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 sm:gap-3">
-            <button type="button" onClick={() => setIsWaModalOpen(true)} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 transition cursor-pointer">
-              <Bell className="w-3.5 h-3.5 text-amber-600" />
-              <span>Notif WA</span>
-              <span className="px-1.5 py-0.5 rounded-full bg-amber-400 text-slate-950 text-[10px] font-bold">{Array.isArray(waLogs) ? waLogs.filter((l) => !(Array.isArray(readWaLogIds) && readWaLogIds.includes(l.id))).length : 0}</span>
-            </button>
-            <div className="hidden md:flex flex-col items-end leading-tight">
-              <span className="text-xs font-bold text-slate-800">{currentUser.name}</span>
-              <span className="text-[11px] text-sky-700 font-medium">{getRoleLabel(currentUser.role)}{resolveCurrentUserWhatsApp(currentUser, teamUsers) ? ` • +${resolveCurrentUserWhatsApp(currentUser, teamUsers)}` : " • Belum ada WA"}</span>
-            </div>
-            <button type="button" onClick={() => signOut(auth)} className="p-2 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-600 cursor-pointer" title="Keluar"><LogOut className="w-4 h-4" /></button>
-          </div>
-        </div>
-      </header>
-
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-5 rounded-2xl border border-sky-100">
-          <div>
-            <h2 className="text-lg font-bold text-slate-900">Antrean Produksi Video Vertikal (9:16)</h2>
-            <p className="text-xs text-slate-500 mt-0.5">Tersinkronisasi langsung dengan Firestore • Anggota tim terdaftar: {(Array.isArray(teamUsers) ? teamUsers.length : 0)} orang.</p>
-          </div>
-          {(canCreateTiktokAccount(currentUser?.role) || canCreateOrder(currentUser?.role)) && (
-            <div className="flex flex-wrap items-center gap-2 shrink-0">
-              {canCreateTiktokAccount(currentUser?.role) && (
-                <button
-                  type="button"
-                  onClick={() => setIsAddTiktokModalOpen(true)}
-                  className="px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-500 text-slate-950 text-xs font-bold cursor-pointer"
-                >
-                  + Tambah Akun TikTok
-                </button>
-              )}
-              {canCreateOrder(currentUser?.role) && (
-                <button type="button" onClick={() => {
-                  if (typeof setNewTitle === "function") setNewTitle("");
-                  if (typeof setNewBrand === "function") setNewBrand("");
-                  if (typeof setNewPlatform === "function") setNewPlatform("TikTok");
-                  if (typeof setNewContentType === "function") setNewContentType("");
-                  if (typeof setNewBrief === "function") setNewBrief("");
-                  if (typeof setNewRawFootageUrl === "function") setNewRawFootageUrl("");
-                  if (typeof setNewReferenceUrl === "function") setNewReferenceUrl("");
-                  if (typeof setNewDeadline === "function") setNewDeadline("");
-                  if (typeof setNewPriority === "function") setNewPriority("Normal");
-                  if (typeof setIsNewOrderOpen === "function") setIsNewOrderOpen(true);
-                }} className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold transition cursor-pointer shrink-0">
-                  <Plus className="w-4 h-4" />Buat Order Video
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-
-        {(() => {
-          const allOrders = (Array.isArray(orders) ? orders : []).filter((ord) => {
-            if (!ord) return false;
-            const rText = String(
-              (typeof currentUser !== "undefined" && currentUser?.role) ||
-                (typeof activeRole !== "undefined" ? activeRole : "") ||
-                ""
-            )
-              .trim()
-              .toLowerCase();
-            const isBmAccount =
-              rText.includes("brand manager") ||
-              rText.includes("brand management") ||
-              rText === "manager" ||
-              rText === "admin" ||
-              rText === "owner";
-            if (!isBmAccount) {
-              if (rText.includes("editor") && typeof currentUser !== "undefined" && currentUser) {
-                return isOrderVisibleToCurrentEditor(ord, currentUser);
-              }
-              return true;
-            }
-
-            const myUid = String(currentUser?.uid || currentUser?.id || "").trim();
-            const myEmail = String(currentUser?.email || "").trim().toLowerCase();
-            const myName = String(currentUser?.name || "").trim().toLowerCase();
-            const orderUid = String(ord?.requestedByUid || "").trim();
-            const orderEmail = String(ord?.requestedByEmail || "").trim().toLowerCase();
-            const orderReqBy = String(ord?.requestedBy || "").trim().toLowerCase();
-
-            if (orderUid) return Boolean(myUid && orderUid === myUid);
-            if (orderEmail) return Boolean(myEmail && orderEmail === myEmail);
-            if (orderReqBy) return Boolean((myName && orderReqBy === myName) || (myEmail && orderReqBy === myEmail));
-            return false;
-          });
-          const isPostedItem = (ord) => {
-            const stLow = String(ord?.status || "").trim().toLowerCase();
-            return (
-              Boolean(ord?.isPosted) ||
-              Boolean(ord?.postedAt) ||
-              stLow === "sudah diposting" ||
-              stLow === "sudah diupload" ||
-              stLow === "sudah di-upload" ||
-              stLow === "terposting"
-            );
-          };
-
-          const totalOrderCount = allOrders.length;
-          const queueCount = allOrders.filter(
-            (ord) => !isPostedItem(ord) && String(ord?.status || "").trim() === "Antrean"
-          ).length;
-          const workOrRevisionCount = allOrders.filter((ord) => {
-            if (isPostedItem(ord)) return false;
-            const st = String(ord?.status || "").trim();
-            return st === "Sedang Dikerjakan" || st === "Revisi";
-          }).length;
-          const summaryRoleText = String(
-            (typeof currentUser !== "undefined" && currentUser?.role) ||
-              (typeof activeRole !== "undefined" ? activeRole : "") ||
-              ""
-          )
-            .trim()
-            .toLowerCase();
-          const isSmmSummaryViewer =
-            summaryRoleText.includes("sosial media") ||
-            summaryRoleText.includes("social media") ||
-            summaryRoleText === "smm" ||
-            summaryRoleText === "sosmed";
-
-          const reviewOnlyCount = allOrders.filter((ord) => {
-            if (isPostedItem(ord)) return false;
-            const st = String(ord?.status || "").trim();
-            return st === "Kurasi BM" || st === "Review";
-          }).length;
-          const readyOnlyCount = allOrders.filter((ord) => {
-            if (isPostedItem(ord)) return false;
-            const st = String(ord?.status || "").trim();
-            return st === "Siap Posting" || st === "Selesai";
-          }).length;
-          const reviewOrReadyCount = reviewOnlyCount + readyOnlyCount;
-          const alreadyPostedCount = allOrders.filter((ord) => isPostedItem(ord)).length;
-
-          const summaryCardsConfig = isSmmSummaryViewer
-            ? [
-                {
-                  key: "total",
-                  title: "Total Order",
-                  count: totalOrderCount,
-                  cardClass: "bg-white p-4 rounded-2xl border border-slate-200/80 hover:border-slate-400 transition text-left cursor-pointer",
-                  labelClass: "text-xs font-medium text-slate-500",
-                  valueClass: "text-2xl font-bold text-slate-900 mt-1",
-                },
-                {
-                  key: "queue",
-                  title: "Dalam Antrean",
-                  count: queueCount,
-                  cardClass: "bg-white p-4 rounded-2xl border border-sky-200 hover:border-sky-400 transition text-left cursor-pointer",
-                  labelClass: "text-xs font-medium text-sky-700",
-                  valueClass: "text-2xl font-bold text-sky-800 mt-1",
-                },
-                {
-                  key: "work_revision",
-                  title: "Dikerjakan / Revisi",
-                  count: workOrRevisionCount,
-                  cardClass: "bg-white p-4 rounded-2xl border border-amber-200 hover:border-amber-400 transition text-left cursor-pointer",
-                  labelClass: "text-xs font-medium text-amber-700",
-                  valueClass: "text-2xl font-bold text-amber-800 mt-1",
-                },
-                {
-                  key: "review_only",
-                  title: "Review",
-                  count: reviewOnlyCount,
-                  cardClass: "bg-white p-4 rounded-2xl border border-teal-200 hover:border-teal-400 transition text-left cursor-pointer",
-                  labelClass: "text-xs font-medium text-teal-700",
-                  valueClass: "text-2xl font-bold text-teal-800 mt-1",
-                },
-                {
-                  key: "ready_only",
-                  title: "Siap Posting",
-                  count: readyOnlyCount,
-                  cardClass: "bg-white p-4 rounded-2xl border border-emerald-200 hover:border-emerald-400 transition text-left cursor-pointer",
-                  labelClass: "text-xs font-medium text-emerald-700",
-                  valueClass: "text-2xl font-bold text-emerald-800 mt-1",
-                },
-                {
-                  key: "posted",
-                  title: "Sudah Posting",
-                  count: alreadyPostedCount,
-                  cardClass: "bg-white p-4 rounded-2xl border border-violet-200 hover:border-violet-400 transition text-left cursor-pointer",
-                  labelClass: "text-xs font-medium text-violet-700",
-                  valueClass: "text-2xl font-bold text-violet-800 mt-1",
-                },
-              ]
-            : [
-                {
-                  key: "total",
-                  title: "Total Order",
-                  count: totalOrderCount,
-                  cardClass: "bg-white p-4 rounded-2xl border border-slate-200/80 hover:border-slate-400 transition text-left cursor-pointer",
-                  labelClass: "text-xs font-medium text-slate-500",
-                  valueClass: "text-2xl font-bold text-slate-900 mt-1",
-                },
-                {
-                  key: "queue",
-                  title: "Dalam Antrean",
-                  count: queueCount,
-                  cardClass: "bg-white p-4 rounded-2xl border border-sky-200 hover:border-sky-400 transition text-left cursor-pointer",
-                  labelClass: "text-xs font-medium text-sky-700",
-                  valueClass: "text-2xl font-bold text-sky-800 mt-1",
-                },
-                {
-                  key: "work_revision",
-                  title: "Dikerjakan / Revisi",
-                  count: workOrRevisionCount,
-                  cardClass: "bg-white p-4 rounded-2xl border border-amber-200 hover:border-amber-400 transition text-left cursor-pointer",
-                  labelClass: "text-xs font-medium text-amber-700",
-                  valueClass: "text-2xl font-bold text-amber-800 mt-1",
-                },
-                {
-                  key: "review_ready",
-                  title: "Review / Siap Posting",
-                  count: reviewOrReadyCount,
-                  cardClass: "bg-white p-4 rounded-2xl border border-emerald-200 hover:border-emerald-400 transition text-left cursor-pointer",
-                  labelClass: "text-xs font-medium text-emerald-700",
-                  valueClass: "text-2xl font-bold text-emerald-800 mt-1",
-                },
-                {
-                  key: "posted",
-                  title: "Sudah Posting",
-                  count: alreadyPostedCount,
-                  cardClass: "bg-white p-4 rounded-2xl border border-violet-200 hover:border-violet-400 transition text-left cursor-pointer",
-                  labelClass: "text-xs font-medium text-violet-700",
-                  valueClass: "text-2xl font-bold text-violet-800 mt-1",
-                },
-              ];
-
-          const parseCardOrderMs = (item) => {
-            const raw = item?.createdAt ?? item?.timestamp ?? item?.updatedAt ?? item?.postedAt ?? null;
-            if (!raw) return null;
-            if (typeof raw === "number") return raw;
-            if (typeof raw?.toMillis === "function") return raw.toMillis();
-            if (typeof raw?.seconds === "number") return raw.seconds * 1000;
-            const dt = Date.parse(raw);
-            return Number.isNaN(dt) ? null : dt;
-          };
-
-          const activeCardCfg = summaryCardsConfig.find((c) => c.key === summaryPopupKey) || null;
-          const popupOrders = (() => {
-            if (!activeCardCfg) return [];
-            const filtered = allOrders
-              .map((order, index) => ({ order, index }))
-              .filter(({ order }) => {
-                if (typeof isOrderOwnedByCurrentAccount === "function" && !isOrderOwnedByCurrentAccount(order)) {
-                  return false;
-                }
-                if (!order) return false;
-                const posted = isPostedItem(order);
-                const st = String(order?.status || "").trim();
-                if (activeCardCfg.key === "total") return true;
-                if (activeCardCfg.key === "queue") return !posted && st === "Antrean";
-                if (activeCardCfg.key === "work_revision")
-                  return !posted && (st === "Sedang Dikerjakan" || st === "Revisi");
-                if (activeCardCfg.key === "review_only")
-                  return !posted && (st === "Kurasi BM" || st === "Review");
-                if (activeCardCfg.key === "ready_only")
-                  return !posted && (st === "Siap Posting" || st === "Selesai");
-                if (activeCardCfg.key === "review_ready")
-                  return !posted && (st === "Kurasi BM" || st === "Review" || st === "Siap Posting" || st === "Selesai");
-                if (activeCardCfg.key === "posted") return posted;
-                return false;
-              })
-              .sort((a, b) => {
-                const msA = parseCardOrderMs(a.order);
-                const msB = parseCardOrderMs(b.order);
-                if (msA !== null && msB !== null && msA !== msB) return msA - msB;
-                if (msA !== null && msB === null) return -1;
-                if (msA === null && msB !== null) return 1;
-                return a.index - b.index;
-              })
-              .map(({ order }) => order);
-
-            if (activeCardCfg.key === "review_ready") {
-              const rev = filtered.filter((o) => {
-                const s = String(o?.status || "").trim();
-                return s === "Kurasi BM" || s === "Review";
-              });
-              const ready = filtered.filter((o) => {
-                const s = String(o?.status || "").trim();
-                return s === "Siap Posting" || s === "Selesai";
-              });
-              return [...rev, ...ready];
-            }
-            return filtered;
-          })();
-
-          const summaryGridClass = isSmmSummaryViewer
-            ? "grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4"
-            : "grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4";
-
-          return (
-            <>
-              <div className={summaryGridClass}>
-                {summaryCardsConfig.map((card) => (
-                  <button
-                    key={card.key}
-                    type="button"
-                    onClick={() => setSummaryPopupKey(card.key)}
-                    className={card.cardClass}
-                  >
-                    <div className={card.labelClass}>{card.title}</div>
-                    <div className={card.valueClass}>{card.count}</div>
-                  </button>
-                ))}
-              </div>
-
-              {activeCardCfg && (
-                <div
-                  onClick={() => setSummaryPopupKey(null)}
-                  className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-[1px] flex items-center justify-center p-4"
-                >
-                  <div
-                    onClick={(e) => e.stopPropagation()}
-                    className="bg-white rounded-2xl border border-slate-200 shadow-xl w-full max-w-2xl max-h-[82vh] flex flex-col overflow-hidden"
-                  >
-                    <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
-                      <div className="flex items-baseline gap-2.5">
-                        <h3 className="text-base font-bold text-slate-900">{activeCardCfg.title}</h3>
-                        <span className="text-xs font-medium text-slate-500">
-                          {popupOrders.length} konten
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setSummaryPopupKey(null)}
-                        className="px-3 py-1 rounded-lg border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
-                      >
-                        Tutup
-                      </button>
-                    </div>
-
-                    <div className="p-5 overflow-y-auto space-y-2.5">
-                      {popupOrders.length === 0 ? (
-                        <div className="rounded-xl border border-dashed border-slate-300 p-8 text-center text-xs text-slate-500">
-                          Belum ada konten untuk kategori {activeCardCfg.title}.
+    <div className="min-h-screen bg-slate-50/60">
+      <div className="max-w-[1600px] mx-auto px-3 sm:px-6 py-4 grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
+        <div className="xl:col-span-9 min-w-0">
+          <>
+              <div className="min-h-screen bg-slate-50 text-slate-800" style={{ backgroundImage: "linear-gradient(135deg, rgba(186, 230, 253, 0.45) 0%, rgba(240, 249, 255, 0.75) 50%, rgba(253, 230, 138, 0.42) 100%)" }}>
+                <header className="sticky top-0 z-30 bg-white/95 border-b border-sky-100">
+                  <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <BrandLogo sizeClass="w-10 h-10" />
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-base text-slate-900 truncate">CreativeFlow Studio</span>
+                          <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-100 text-amber-800 border border-amber-200">9:16 Vertical</span>
                         </div>
-                      ) : (
-                        popupOrders.map((ord) => {
-                          const isPostedItemDone = isPostedItem(ord);
-                          const isReadyItem = !isPostedItemDone && String(ord?.status || "").trim() === "Selesai";
-                          const badgeText = isPostedItemDone
-                            ? "Terposting"
-                            : isReadyItem
-                            ? "Siap Posting"
-                            : ord?.status || "Antrean";
-
-                          return (
-                            <div
-                              key={ord.docId || ord.id}
-                              onClick={() => {
-                                if (typeof setShowEditorSubmitTab === "function") setShowEditorSubmitTab(false);
-                                if (typeof setShowRevisionInput === "function") setShowRevisionInput(false);
-                                if (typeof setSelectedOrderId === "function") setSelectedOrderId(ord.docId || ord.id);
-                                setSummaryPopupKey(null);
-                              }}
-                              className="p-3.5 rounded-xl border border-slate-200 hover:border-sky-300 hover:bg-sky-50/40 transition flex items-center justify-between gap-3 cursor-pointer"
-                            >
-                              <div className="min-w-0 space-y-1">
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <span className="text-[11px] font-bold text-sky-700 bg-sky-50 px-2 py-0.5 rounded-md">
-                                    {ord.id || "ORDER"}
-                                  </span>
-                                  <span className="text-[11px] font-semibold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-full">
-                                    {badgeText}
-                                  </span>
-                                </div>
-                                <div className="text-sm font-bold text-slate-900 truncate">
-                                  {ord.title || "Untitled Order"}
-                                </div>
-                                <div className="text-xs text-slate-500 truncate">
-                                  {ord.accountName || ord.brand || "-"} • {ord.platform || "TikTok"}
-                                </div>
-                              </div>
-                              <span className="text-xs font-semibold text-sky-700 shrink-0">Detail →</span>
-                            </div>
-                          );
-                        })
-                      )}
+                        <p className="text-[11px] text-slate-500 truncate">Portal Order & Antrean Edit Video Sosial Media Tim</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 sm:gap-3">
+                      <button type="button" onClick={() => setIsWaModalOpen(true)} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 transition cursor-pointer">
+                        <Bell className="w-3.5 h-3.5 text-amber-600" />
+                        <span>Notif WA</span>
+                        <span className="px-1.5 py-0.5 rounded-full bg-amber-400 text-slate-950 text-[10px] font-bold">{Array.isArray(waLogs) ? waLogs.filter((l) => !(Array.isArray(readWaLogIds) && readWaLogIds.includes(l.id))).length : 0}</span>
+                      </button>
+                      <div className="hidden md:flex flex-col items-end leading-tight">
+                        <span className="text-xs font-bold text-slate-800">{currentUser.name}</span>
+                        <span className="text-[11px] text-sky-700 font-medium">{getRoleLabel(currentUser.role)}{resolveCurrentUserWhatsApp(currentUser, teamUsers) ? ` • +${resolveCurrentUserWhatsApp(currentUser, teamUsers)}` : " • Belum ada WA"}</span>
+                      </div>
+                      <button type="button" onClick={() => signOut(auth)} className="p-2 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-600 cursor-pointer" title="Keluar"><LogOut className="w-4 h-4" /></button>
                     </div>
                   </div>
-                </div>
-              )}
-            </>
-          );
-        })()}
-
-
-          {/* Grid Card Akun TikTok (Real-Time dari Firestore) */}
-          {canViewAllTiktokAccounts(currentUser?.role) && (
-          <section className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-baseline gap-2.5">
-                <h2 className="text-base font-bold text-slate-900">Akun TikTok</h2>
-                <span className="text-xs font-medium text-slate-500">
-                  {(tiktokAccounts?.length ?? 0)} akun
-                </span>
-              </div>
-              <div className="flex items-center gap-3">
-                <span className="hidden sm:inline text-[11px] text-slate-400">
-                  Sinkron real-time • Klik "Buka akun" untuk kelola jenis konten & monitoring order
-                </span>
-              </div>
-            </div>
-
-            {(tiktokAccounts?.length ?? 0) === 0 ? (
-              <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-6 text-center space-y-2">
-                <p className="text-sm font-semibold text-slate-700">Belum ada akun TikTok terdaftar</p>
-                <p className="text-xs text-slate-500">
-                  {canCreateTiktokAccount(currentUser?.role)
-                    ? 'Klik tombol "+ Tambah Akun TikTok" di atas untuk menambahkan akun pertama Anda.'
-                    : "Penambahan akun TikTok baru hanya dapat dilakukan oleh Brand Manager."}
-                </p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {(Array.isArray(tiktokAccounts) ? tiktokAccounts : []).map((account, idx) => {
-                  const accountOrders = (Array.isArray(orders) ? orders : []).filter((ord) =>
-                    isOrderMatchedToTiktokAccount(ord, account)
-                  );
-                  const isProductionViewer = String(
-                    (typeof currentUser !== "undefined" && currentUser?.role) ||
-                      (typeof activeRole !== "undefined" ? activeRole : "") ||
-                      ""
-                  )
-                    .trim()
-                    .toLowerCase()
-                    .includes("production");
-
-                  const isReadyOrPostedOrder = (ord) => {
-                    if (!ord) return false;
-                    const stLow = String(ord?.status || "").trim().toLowerCase();
-                    const posted =
-                      Boolean(ord?.isPosted) ||
-                      Boolean(ord?.postedAt) ||
-                      stLow === "sudah diposting" ||
-                      stLow === "sudah diupload" ||
-                      stLow === "sudah di-upload" ||
-                      stLow === "terposting";
-                    const ready = stLow === "selesai" || stLow === "siap posting";
-                    return posted || ready;
-                  };
-
-                  const viewerRoleText = String(
-                    (typeof currentUser !== "undefined" && currentUser?.role) ||
-                      (typeof activeRole !== "undefined" ? activeRole : "") ||
-                      ""
-                  )
-                    .trim()
-                    .toLowerCase();
-                  const isSmmCardViewer =
-                    viewerRoleText.includes("sosial media") ||
-                    viewerRoleText.includes("social media") ||
-                    viewerRoleText === "smm" ||
-                    viewerRoleText === "sosmed";
-
-                  const isPostedCardOrder = (ord) => {
-                    if (!ord) return false;
-                    const stLow = String(ord?.status || "").trim().toLowerCase();
-                    return (
-                      Boolean(ord?.isPosted) ||
-                      Boolean(ord?.postedAt) ||
-                      stLow === "sudah diposting" ||
-                      stLow === "sudah diupload" ||
-                      stLow === "sudah di-upload" ||
-                      stLow === "terposting"
-                    );
-                  };
-
-                  const readyToPostCount = accountOrders.filter((ord) => {
-                    if (!ord || isPostedCardOrder(ord)) return false;
-                    const stLow = String(ord?.status || "").trim().toLowerCase();
-                    return stLow === "siap posting" || stLow === "selesai";
-                  }).length;
-
-                  const inProductionCount = accountOrders.filter(
-                    (ord) => !isReadyOrPostedOrder(ord)
-                  ).length;
-
-                  const needsReviewCount = accountOrders.filter((ord) => {
-                    if (!ord || isPostedCardOrder(ord)) return false;
-                    const st = String(ord?.status || "").trim();
-                    return st === "Review" || st === "Kurasi BM";
-                  }).length;
-
-                  const cardMetricCount = isProductionViewer
-                    ? inProductionCount
-                    : isSmmCardViewer
-                    ? readyToPostCount
-                    : needsReviewCount;
-                  const cardMetricLabel = isProductionViewer
-                    ? "video dalam produksi"
-                    : isSmmCardViewer
-                    ? "video siap posting"
-                    : "video yang harus di review";
-                  const tags = sanitizeContentTypes(
-                    Array.isArray(account.contentTypes) ? account.contentTypes : []
-                  );
-
-                  return (
-                    <div
-                      key={String(account.docId || account.id || account.accountName || idx) + "_" + idx}
-                      className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs hover:border-slate-300 transition flex flex-col justify-between gap-4"
-                    >
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-3 min-w-0 flex-1">
-                            <div className="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center font-bold text-sm shrink-0 overflow-hidden">
-                              {(account?.logoUrl || account?.brandLogo) ? (
-                                <img
-                                  src={account.logoUrl || account.brandLogo}
-                                  alt={account?.accountName || account?.brandName || "Logo Akun"}
-                                  className="w-full h-full object-cover"
-                                />
-                              ) : (
-                                "♪"
-                              )}
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              <div className="font-bold text-sm text-slate-900 truncate">
-                                {account.accountName || account.brandName}
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center justify-between gap-2 text-xs">
-                          <span className="font-medium text-slate-600 truncate">
-                            {account.brandName || "-"}
-                          </span>
-                          <span className="text-[11px] text-slate-400 shrink-0">
-                            {cardMetricCount} {cardMetricLabel}
-                          </span>
-                        </div>
-
-                        <div className="flex flex-wrap gap-1.5">
-                          {tags.length > 0 ? (
-                            tags.map((tag) => (
-                              <span
-                                key={tag}
-                                className="px-2.5 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200/80 text-[11px] font-medium"
-                              >
-                                {tag}
-                              </span>
-                            ))
-                          ) : (
-                            <span className="text-[11px] text-slate-400">Belum ada jenis konten</span>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
-                        <span
-                          className={
-                            "px-2.5 py-1 rounded-md text-xs font-semibold " +
-                            (cardMetricCount > 0
-                              ? (isProductionViewer
-                                  ? "bg-amber-50 text-amber-700 border border-amber-200"
-                                  : "bg-emerald-50 text-emerald-700 border border-emerald-200")
-                              : "bg-slate-100 text-slate-600")
-                          }
-                        >
-                          {cardMetricCount} {cardMetricLabel}
-                        </span>
-
-                        <button
-                          type="button"
-                          onClick={() => openTiktokAccountManager(account, "monitoring")}
-                          className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700 hover:text-sky-700 transition cursor-pointer"
-                        >
-                          <span>Buka akun</span>
-                          <ChevronRight className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
+                </header>
+          
+                <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-5 rounded-2xl border border-sky-100">
+                    <div>
+                      <h2 className="text-lg font-bold text-slate-900">Antrean Produksi Video Vertikal (9:16)</h2>
+                      <p className="text-xs text-slate-500 mt-0.5">Tersinkronisasi langsung dengan Firestore • Anggota tim terdaftar: {(Array.isArray(teamUsers) ? teamUsers.length : 0)} orang.</p>
                     </div>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-          )}
-
-          {/* Grid Card Jenis Konten khusus Role Editor */}
-          {(() => {
-            const roleNow = String(
-              (typeof currentUser !== "undefined" && currentUser?.role) ||
-                (typeof activeRole !== "undefined" ? activeRole : "") ||
-                ""
-            )
-              .trim()
-              .toLowerCase();
-            if (!roleNow.includes("editor")) return null;
-
-            const normType = (val) =>
-              String(val || "")
-                .trim()
-                .toLowerCase();
-
-            const extractOrderTypes = (ord) => {
-              const rawList = [];
-              if (Array.isArray(ord?.contentTypes)) rawList.push(...ord.contentTypes);
-              for (const key of [
-                "contentType",
-                "jenisKonten",
-                "tipeKonten",
-                "category",
-                "contentCategory",
-              ]) {
-                if (ord && ord[key]) rawList.push(ord[key]);
-              }
-              const cleaned =
-                typeof sanitizeContentTypes === "function"
-                  ? sanitizeContentTypes(rawList)
-                  : rawList.map((x) => String(x || "").trim()).filter(Boolean);
-              return Array.from(new Set(cleaned));
-            };
-
-            const accountTypesRaw = (Array.isArray(tiktokAccounts) ? tiktokAccounts : []).flatMap(
-              (acc) => (Array.isArray(acc?.contentTypes) ? acc.contentTypes : [])
-            );
-            const cleanedAccountTypes =
-              typeof sanitizeContentTypes === "function"
-                ? sanitizeContentTypes(accountTypesRaw)
-                : accountTypesRaw.map((x) => String(x || "").trim()).filter(Boolean);
-
-            const visibleEditorOrders = (Array.isArray(orders) ? orders : []).filter((ord) => {
-              if (!ord) return false;
-              if (typeof currentUser !== "undefined" && currentUser) {
-                return isOrderVisibleToCurrentEditor(ord, currentUser);
-              }
-              return true;
-            });
-
-            const typeMap = new Map();
-            for (const t of cleanedAccountTypes) {
-              const key = normType(t);
-              if (key && !typeMap.has(key)) {
-                typeMap.set(key, { label: t, orders: [] });
-              }
-            }
-
-            for (const ord of visibleEditorOrders) {
-              const oTypes = extractOrderTypes(ord);
-              for (const t of oTypes) {
-                const key = normType(t);
-                if (!key) continue;
-                if (!typeMap.has(key)) {
-                  typeMap.set(key, { label: t, orders: [] });
-                }
-                typeMap.get(key).orders.push(ord);
-              }
-            }
-
-            const contentTypeCards = Array.from(typeMap.values()).map((entry) => {
-              const queueAndRevisionOrders = (entry.orders || []).filter((ord) => {
-                const st = String(ord?.status || "").trim();
-                return st === "Antrean" || st === "Revisi";
-              });
-              return {
-                ...entry,
-                orders: queueAndRevisionOrders,
-                queueOrRevisionCount: queueAndRevisionOrders.length,
-              };
-            });
-
-            const activePopupGroup = editorContentPopupType
-              ? contentTypeCards.find(
-                  (item) => normType(item.label) === normType(editorContentPopupType)
-                ) || {
-                  label: editorContentPopupType,
-                  orders: (Array.isArray(orders) ? orders : []).filter((ord) => {
-                    if (!ord) return false;
-                    const st = String(ord?.status || "").trim();
-                    if (st !== "Antrean" && st !== "Revisi") return false;
-                    if (typeof currentUser !== "undefined" && currentUser && !isOrderVisibleToCurrentEditor(ord, currentUser)) {
-                      return false;
-                    }
-                    return extractOrderTypes(ord).some(
-                      (t) => normType(t) === normType(editorContentPopupType)
-                    );
-                  }),
-                  queueOrRevisionCount: 0,
-                }
-              : null;
-
-            return (
-              <>
-                <section className="space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-baseline gap-2.5">
-                      <h2 className="text-base font-bold text-slate-900">Jenis Konten</h2>
-                      <span className="text-xs font-medium text-slate-500">
-                        {contentTypeCards.length} jenis konten
-                      </span>
-                    </div>
-                    {selectedEditorContentType !== "Semua" && (
-                      <button
-                        type="button"
-                        onClick={() => setSelectedEditorContentType("Semua")}
-                        className="text-xs font-semibold text-sky-700 hover:text-sky-800 cursor-pointer"
-                      >
-                        Tampilkan semua jenis konten
-                      </button>
+                    {(canCreateTiktokAccount(currentUser?.role) || canCreateOrder(currentUser?.role)) && (
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        {canCreateTiktokAccount(currentUser?.role) && (
+                          <button
+                            type="button"
+                            onClick={() => setIsAddTiktokModalOpen(true)}
+                            className="px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-500 text-slate-950 text-xs font-bold cursor-pointer"
+                          >
+                            + Tambah Akun TikTok
+                          </button>
+                        )}
+                        {canCreateOrder(currentUser?.role) && (
+                          <button type="button" onClick={() => {
+                            if (typeof setNewTitle === "function") setNewTitle("");
+                            if (typeof setNewBrand === "function") setNewBrand("");
+                            if (typeof setNewPlatform === "function") setNewPlatform("TikTok");
+                            if (typeof setNewContentType === "function") setNewContentType("");
+                            if (typeof setNewBrief === "function") setNewBrief("");
+                            if (typeof setNewRawFootageUrl === "function") setNewRawFootageUrl("");
+                            if (typeof setNewReferenceUrl === "function") setNewReferenceUrl("");
+                            if (typeof setNewDeadline === "function") setNewDeadline("");
+                            if (typeof setNewPriority === "function") setNewPriority("Normal");
+                            if (typeof setIsNewOrderOpen === "function") setIsNewOrderOpen(true);
+                          }} className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold transition cursor-pointer shrink-0">
+                            <Plus className="w-4 h-4" />Buat Order Video
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
-
-                  {contentTypeCards.length === 0 ? (
-                    <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-6 text-center">
-                      <p className="text-sm font-semibold text-slate-700">
-                        Belum ada jenis konten terdaftar pada akun TikTok
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                      {contentTypeCards.map((item) => {
-                        const isSelected =
-                          normType(selectedEditorContentType) === normType(item.label);
-                        const orderCount = item.orders.length;
-
-                        const handleSelectContentType = () => {
-                          setSelectedEditorContentType(item.label);
-                          setEditorContentPopupType(item.label);
-                        };
-
+          
+                  {(() => {
+                    const allOrders = (Array.isArray(orders) ? orders : []).filter((ord) => {
+                      if (!ord) return false;
+                      const rText = String(
+                        (typeof currentUser !== "undefined" && currentUser?.role) ||
+                          (typeof activeRole !== "undefined" ? activeRole : "") ||
+                          ""
+                      )
+                        .trim()
+                        .toLowerCase();
+                      const isBmAccount =
+                        rText.includes("brand manager") ||
+                        rText.includes("brand management") ||
+                        rText === "manager" ||
+                        rText === "admin" ||
+                        rText === "owner";
+                      if (!isBmAccount) {
+                        if (rText.includes("editor") && typeof currentUser !== "undefined" && currentUser) {
+                          return isOrderVisibleToCurrentEditor(ord, currentUser);
+                        }
+                        return true;
+                      }
+          
+                      const myUid = String(currentUser?.uid || currentUser?.id || "").trim();
+                      const myEmail = String(currentUser?.email || "").trim().toLowerCase();
+                      const myName = String(currentUser?.name || "").trim().toLowerCase();
+                      const orderUid = String(ord?.requestedByUid || "").trim();
+                      const orderEmail = String(ord?.requestedByEmail || "").trim().toLowerCase();
+                      const orderReqBy = String(ord?.requestedBy || "").trim().toLowerCase();
+          
+                      if (orderUid) return Boolean(myUid && orderUid === myUid);
+                      if (orderEmail) return Boolean(myEmail && orderEmail === myEmail);
+                      if (orderReqBy) return Boolean((myName && orderReqBy === myName) || (myEmail && orderReqBy === myEmail));
+                      return false;
+                    });
+                    const isPostedItem = (ord) => {
+                      const stLow = String(ord?.status || "").trim().toLowerCase();
+                      return (
+                        Boolean(ord?.isPosted) ||
+                        Boolean(ord?.postedAt) ||
+                        stLow === "sudah diposting" ||
+                        stLow === "sudah diupload" ||
+                        stLow === "sudah di-upload" ||
+                        stLow === "terposting"
+                      );
+                    };
+          
+                    const totalOrderCount = allOrders.length;
+                    const queueCount = allOrders.filter(
+                      (ord) => !isPostedItem(ord) && String(ord?.status || "").trim() === "Antrean"
+                    ).length;
+                    const workOrRevisionCount = allOrders.filter((ord) => {
+                      if (isPostedItem(ord)) return false;
+                      const st = String(ord?.status || "").trim();
+                      return st === "Sedang Dikerjakan" || st === "Revisi";
+                    }).length;
+                    const summaryRoleText = String(
+                      (typeof currentUser !== "undefined" && currentUser?.role) ||
+                        (typeof activeRole !== "undefined" ? activeRole : "") ||
+                        ""
+                    )
+                      .trim()
+                      .toLowerCase();
+                    const isPublisherSummaryViewer =
+                      summaryRoleText.includes("publisher") ||
+                      summaryRoleText === "pub" ||
+                      summaryRoleText === "penerbit";
+                    const isSmmSummaryViewer =
+                      summaryRoleText.includes("sosial media") ||
+                      summaryRoleText.includes("social media") ||
+                      summaryRoleText === "smm" ||
+                      summaryRoleText === "sosmed";
+          
+                    const reviewOnlyCount = allOrders.filter((ord) => {
+                      if (isPostedItem(ord)) return false;
+                      const st = String(ord?.status || "").trim();
+                      return st === "Kurasi BM" || st === "Review";
+                    }).length;
+                    const readyOnlyCount = allOrders.filter((ord) => {
+                      if (isPostedItem(ord)) return false;
+                      const st = String(ord?.status || "").trim();
+                      return st === "Siap Posting" || st === "Selesai";
+                    }).length;
+                    const reviewOrReadyCount = reviewOnlyCount + readyOnlyCount;
+                    const alreadyPostedCount = allOrders.filter((ord) => isPostedItem(ord)).length;
+          
+                    const summaryCardsConfig = isSmmSummaryViewer
+                      ? [
+                          {
+                            key: "total",
+                            title: "Total Order",
+                            count: totalOrderCount,
+                            cardClass: "bg-white p-4 rounded-2xl border border-slate-200/80 hover:border-slate-400 transition text-left cursor-pointer",
+                            labelClass: "text-xs font-medium text-slate-500",
+                            valueClass: "text-2xl font-bold text-slate-900 mt-1",
+                          },
+                          {
+                            key: "queue",
+                            title: "Dalam Antrean",
+                            count: queueCount,
+                            cardClass: "bg-white p-4 rounded-2xl border border-sky-200 hover:border-sky-400 transition text-left cursor-pointer",
+                            labelClass: "text-xs font-medium text-sky-700",
+                            valueClass: "text-2xl font-bold text-sky-800 mt-1",
+                          },
+                          {
+                            key: "work_revision",
+                            title: "Dikerjakan / Revisi",
+                            count: workOrRevisionCount,
+                            cardClass: "bg-white p-4 rounded-2xl border border-amber-200 hover:border-amber-400 transition text-left cursor-pointer",
+                            labelClass: "text-xs font-medium text-amber-700",
+                            valueClass: "text-2xl font-bold text-amber-800 mt-1",
+                          },
+                          {
+                            key: "review_only",
+                            title: "Review",
+                            count: reviewOnlyCount,
+                            cardClass: "bg-white p-4 rounded-2xl border border-teal-200 hover:border-teal-400 transition text-left cursor-pointer",
+                            labelClass: "text-xs font-medium text-teal-700",
+                            valueClass: "text-2xl font-bold text-teal-800 mt-1",
+                          },
+                          {
+                            key: "ready_only",
+                            title: "Siap Posting",
+                            count: readyOnlyCount,
+                            cardClass: "bg-white p-4 rounded-2xl border border-emerald-200 hover:border-emerald-400 transition text-left cursor-pointer",
+                            labelClass: "text-xs font-medium text-emerald-700",
+                            valueClass: "text-2xl font-bold text-emerald-800 mt-1",
+                          },
+                          {
+                            key: "posted",
+                            title: "Sudah Posting",
+                            count: alreadyPostedCount,
+                            cardClass: "bg-white p-4 rounded-2xl border border-violet-200 hover:border-violet-400 transition text-left cursor-pointer",
+                            labelClass: "text-xs font-medium text-violet-700",
+                            valueClass: "text-2xl font-bold text-violet-800 mt-1",
+                          },
+                        ]
+                      : [
+                          {
+                            key: "total",
+                            title: "Total Order",
+                            count: totalOrderCount,
+                            cardClass: "bg-white p-4 rounded-2xl border border-slate-200/80 hover:border-slate-400 transition text-left cursor-pointer",
+                            labelClass: "text-xs font-medium text-slate-500",
+                            valueClass: "text-2xl font-bold text-slate-900 mt-1",
+                          },
+                          {
+                            key: "queue",
+                            title: "Dalam Antrean",
+                            count: queueCount,
+                            cardClass: "bg-white p-4 rounded-2xl border border-sky-200 hover:border-sky-400 transition text-left cursor-pointer",
+                            labelClass: "text-xs font-medium text-sky-700",
+                            valueClass: "text-2xl font-bold text-sky-800 mt-1",
+                          },
+                          {
+                            key: "work_revision",
+                            title: "Dikerjakan / Revisi",
+                            count: workOrRevisionCount,
+                            cardClass: "bg-white p-4 rounded-2xl border border-amber-200 hover:border-amber-400 transition text-left cursor-pointer",
+                            labelClass: "text-xs font-medium text-amber-700",
+                            valueClass: "text-2xl font-bold text-amber-800 mt-1",
+                          },
+                          {
+                            key: "review_only",
+                            title: "Review",
+                            count: reviewOnlyCount,
+                            cardClass: "bg-white p-4 rounded-2xl border border-teal-200 hover:border-teal-400 transition text-left cursor-pointer",
+                            labelClass: "text-xs font-medium text-teal-700",
+                            valueClass: "text-2xl font-bold text-teal-800 mt-1",
+                          },
+                          {
+                            key: "ready_only",
+                            title: "Siap Posting",
+                            count: readyOnlyCount,
+                            cardClass: "bg-white p-4 rounded-2xl border border-emerald-200 hover:border-emerald-400 transition text-left cursor-pointer",
+                            labelClass: "text-xs font-medium text-emerald-700",
+                            valueClass: "text-2xl font-bold text-emerald-800 mt-1",
+                          },
+                          {
+                            key: "posted",
+                            title: "Sudah Posting",
+                            count: alreadyPostedCount,
+                            cardClass: "bg-white p-4 rounded-2xl border border-violet-200 hover:border-violet-400 transition text-left cursor-pointer",
+                            labelClass: "text-xs font-medium text-violet-700",
+                            valueClass: "text-2xl font-bold text-violet-800 mt-1",
+                          },
+                        ];
+          
+                    const parseCardOrderMs = (item) => {
+                      const raw = item?.createdAt ?? item?.timestamp ?? item?.updatedAt ?? item?.postedAt ?? null;
+                      if (!raw) return null;
+                      if (typeof raw === "number") return raw;
+                      if (typeof raw?.toMillis === "function") return raw.toMillis();
+                      if (typeof raw?.seconds === "number") return raw.seconds * 1000;
+                      const dt = Date.parse(raw);
+                      return Number.isNaN(dt) ? null : dt;
+                    };
+          
+                    const activeCardCfg = summaryCardsConfig.find((c) => c.key === summaryPopupKey) || null;
+                    const popupOrders = (() => {
+                      if (!activeCardCfg) return [];
+                      const filtered = allOrders
+                        .map((order, index) => ({ order, index }))
+                        .filter(({ order }) => {
+                          if (typeof isOrderOwnedByCurrentAccount === "function" && !isOrderOwnedByCurrentAccount(order)) {
+                            return false;
+                          }
+                          if (!order) return false;
+                          const posted = isPostedItem(order);
+                          const st = String(order?.status || "").trim();
+                          if (activeCardCfg.key === "total") return true;
+                          if (activeCardCfg.key === "queue") return !posted && st === "Antrean";
+                          if (activeCardCfg.key === "work_revision")
+                            return !posted && (st === "Sedang Dikerjakan" || st === "Revisi");
+                          if (activeCardCfg.key === "review_only")
+                            return !posted && (st === "Kurasi BM" || st === "Review");
+                          if (activeCardCfg.key === "ready_only")
+                            return !posted && (st === "Siap Posting" || st === "Selesai");
+                          if (activeCardCfg.key === "review_ready")
+                            return !posted && (st === "Kurasi BM" || st === "Review" || st === "Siap Posting" || st === "Selesai");
+                          if (activeCardCfg.key === "posted") return posted;
+                          return false;
+                        })
+                        .sort((a, b) => {
+                          const msA = parseCardOrderMs(a.order);
+                          const msB = parseCardOrderMs(b.order);
+                          if (msA !== null && msB !== null && msA !== msB) return msA - msB;
+                          if (msA !== null && msB === null) return -1;
+                          if (msA === null && msB !== null) return 1;
+                          return a.index - b.index;
+                        })
+                        .map(({ order }) => order);
+          
+                      if (activeCardCfg.key === "review_ready") {
+                        const rev = filtered.filter((o) => {
+                          const s = String(o?.status || "").trim();
+                          return s === "Kurasi BM" || s === "Review";
+                        });
+                        const ready = filtered.filter((o) => {
+                          const s = String(o?.status || "").trim();
+                          return s === "Siap Posting" || s === "Selesai";
+                        });
+                        return [...rev, ...ready];
+                      }
+                      return filtered;
+                    })();
+          
+                    const summaryGridClass = "grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4";
+          
+                    if (isPublisherSummaryViewer) {
+                      const basePublisherOrders = (Array.isArray(orders) ? orders : []).filter((ord) => {
+                        if (!ord) return false;
+                        const st = String(ord.status || "").trim();
+                        const postedFlag =
+                          Boolean(ord.isPosted) ||
+                          Boolean(ord.postedAt) ||
+                          st.toLowerCase() === "sudah diposting" ||
+                          st.toLowerCase() === "sudah diupload" ||
+                          st.toLowerCase() === "sudah di-upload";
+                        const readyFlag = st === "Siap Posting" || st === "Selesai";
+                        return postedFlag || readyFlag;
+                      });
+          
+                      const isOrderPostedItem = (ord) => {
+                        const st = String(ord?.status || "").trim().toLowerCase();
                         return (
-                          <div
-                            key={item.label}
-                            role="button"
-                            tabIndex={0}
-                            onClick={handleSelectContentType}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" || e.key === " ") {
-                                e.preventDefault();
-                                handleSelectContentType();
-                              }
-                            }}
-                            className={
-                              "text-left rounded-2xl border p-5 shadow-xs transition flex flex-col justify-between gap-3 cursor-pointer " +
-                              (isSelected
-                                ? "bg-sky-50/70 border-sky-500 ring-2 ring-sky-500/20"
-                                : "bg-white border-slate-200 hover:border-slate-300")
-                            }
-                          >
-                            <div className="space-y-2">
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="font-bold text-sm text-slate-900">
-                                  {item.label}
-                                </span>
-                                {isSelected && (
-                                  <span className="px-2 py-0.5 rounded-md bg-sky-600 text-white text-[10px] font-semibold">
-                                    Dipilih
-                                  </span>
-                                )}
-                              </div>
-                              <p className="text-xs text-slate-500">
-                                Klik untuk melihat daftar order Antrean & Revisi
-                              </p>
-                            </div>
-
-                            <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
-                              <span
-                                className={
-                                  "px-2.5 py-1 rounded-md text-xs font-semibold " +
-                                  (orderCount > 0
-                                    ? "bg-amber-50 text-amber-800 border border-amber-200"
-                                    : "bg-slate-100 text-slate-600")
+                          Boolean(ord?.isPosted) ||
+                          Boolean(ord?.postedAt) ||
+                          st === "sudah diposting" ||
+                          st === "sudah diupload" ||
+                          st === "sudah di-upload"
+                        );
+                      };
+          
+                      const isOrderReadyToPostItem = (ord) => {
+                        if (!ord || isOrderPostedItem(ord)) return false;
+                        const st = String(ord?.status || "").trim();
+                        return st === "Siap Posting" || st === "Selesai";
+                      };
+          
+                      const readyOrdersAll = basePublisherOrders.filter(isOrderReadyToPostItem);
+                      const postedOrdersAll = basePublisherOrders.filter(isOrderPostedItem);
+                      const visiblePublisherOrders =
+                        publisherOrderTab === "history" ? postedOrdersAll : readyOrdersAll;
+          
+                      const publisherAccounts = Array.isArray(tiktokAccounts) ? tiktokAccounts : [];
+                      const getAccountReadyOrders = (acc) =>
+                        readyOrdersAll.filter((ord) =>
+                          typeof isOrderMatchedToTiktokAccount === "function"
+                            ? isOrderMatchedToTiktokAccount(ord, acc)
+                            : String(ord?.accountName || "").trim().toLowerCase() ===
+                                String(acc?.accountName || "").trim().toLowerCase() ||
+                              String(ord?.brand || "").trim().toLowerCase() ===
+                                String(acc?.brandName || "").trim().toLowerCase()
+                        );
+          
+                      const popupAccountReadyList = publisherAccountPopup
+                        ? getAccountReadyOrders(publisherAccountPopup)
+                        : [];
+          
+                      return (
+                        <div className="space-y-6">
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => setPublisherSummaryPopup("ready")}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  setPublisherSummaryPopup("ready");
                                 }
-                              >
-                                {orderCount} video order
-                              </span>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleSelectContentType();
-                                }}
-                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold cursor-pointer"
-                              >
-                                <span>Pilih</span>
-                                <ChevronRight className="w-3.5 h-3.5" />
-                              </button>
+                              }}
+                              className="bg-white rounded-2xl border border-rose-200 hover:border-rose-400 p-4 shadow-xs transition cursor-pointer text-left"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="text-xs font-semibold text-rose-700 uppercase tracking-wide">
+                                  Total Order Siap Posting
+                                </div>
+                                <span className="text-[11px] font-semibold text-rose-700">Lihat List</span>
+                              </div>
+                              <div className="text-3xl font-bold text-slate-900 mt-1">
+                                {readyOrdersAll.length}
+                              </div>
+                              <div className="text-xs text-slate-500 mt-1">
+                                Konten lolos kurasi dan siap diposting
+                              </div>
+                            </div>
+          
+                            <div
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => setPublisherSummaryPopup("history")}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  setPublisherSummaryPopup("history");
+                                }
+                              }}
+                              className="bg-white rounded-2xl border border-emerald-200 hover:border-emerald-400 p-4 shadow-xs transition cursor-pointer text-left"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="text-xs font-semibold text-emerald-700 uppercase tracking-wide">
+                                  Sudah Diposting (Riwayat)
+                                </div>
+                                <span className="text-[11px] font-semibold text-emerald-700">Lihat List</span>
+                              </div>
+                              <div className="text-3xl font-bold text-slate-900 mt-1">
+                                {postedOrdersAll.length}
+                              </div>
+                              <div className="text-xs text-slate-500 mt-1">
+                                Total konten yang sudah dipublikasikan
+                              </div>
                             </div>
                           </div>
+          
+                          <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 space-y-4">
+                            <div>
+                              <h2 className="text-sm font-bold text-slate-900">Akun TikTok</h2>
+                              <p className="text-xs text-slate-500">
+                                Klik Buka Akun untuk melihat daftar konten siap posting per akun.
+                              </p>
+                            </div>
+          
+                            {publisherAccounts.length === 0 ? (
+                              <div className="rounded-xl border border-dashed border-slate-200 p-6 text-center text-xs text-slate-500">
+                                Belum ada akun TikTok terdaftar.
+                              </div>
+                            ) : (
+                              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                                {publisherAccounts.map((acc) => {
+                                  const accReadyList = getAccountReadyOrders(acc);
+                                  const accKey = acc.docId || acc.id || acc.accountName;
+                                  const brandKey = String(acc?.brandName || "").trim().toLowerCase();
+                                  const matchedBrandAcc =
+                                    brandKey &&
+                                    publisherAccounts.find(
+                                      (other) =>
+                                        String(other?.brandName || "").trim().toLowerCase() === brandKey &&
+                                        (other?.logoUrl || other?.brandLogo)
+                                    );
+                                  const matchedBrandOrder =
+                                    brandKey &&
+                                    typeof allOrders !== "undefined" &&
+                                    Array.isArray(allOrders) &&
+                                    allOrders.find(
+                                      (ord) =>
+                                        String(ord?.brandName || ord?.brand || "").trim().toLowerCase() === brandKey &&
+                                        (ord?.brandLogo || ord?.logoUrl)
+                                    );
+                                  const resolvedBrandLogo = String(
+                                    acc?.logoUrl ||
+                                      acc?.brandLogo ||
+                                      matchedBrandAcc?.logoUrl ||
+                                      matchedBrandAcc?.brandLogo ||
+                                      matchedBrandOrder?.brandLogo ||
+                                      matchedBrandOrder?.logoUrl ||
+                                      ""
+                                  ).trim();
+                                  const brandInitials = String(acc?.brandName || acc?.accountName || "BR")
+                                    .replace(/^@/, "")
+                                    .split(/[\s._-]+/)
+                                    .filter(Boolean)
+                                    .slice(0, 2)
+                                    .map((part) => part[0]?.toUpperCase() || "")
+                                    .join("") || "BR";
+          
+                                  return (
+                                    <div
+                                      key={accKey}
+                                      className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4 flex flex-col justify-between gap-3"
+                                    >
+                                      <div className="flex items-start gap-3 min-w-0">
+                                        <div className="w-11 h-11 rounded-xl border border-slate-200 bg-white flex items-center justify-center shrink-0 overflow-hidden shadow-2xs">
+                                          {resolvedBrandLogo ? (
+                                            <img
+                                              src={resolvedBrandLogo}
+                                              alt={acc.brandName || acc.accountName || "Logo Brand"}
+                                              className="w-full h-full object-cover"
+                                              onError={(e) => {
+                                                e.currentTarget.style.display = "none";
+                                              }}
+                                            />
+                                          ) : (
+                                            <span className="text-xs font-extrabold text-slate-700 tracking-tight">
+                                              {brandInitials}
+                                            </span>
+                                          )}
+                                        </div>
+                                        <div className="space-y-1 min-w-0 flex-1">
+                                          <div className="text-sm font-bold text-slate-900 truncate">
+                                            {acc.accountName || acc.brandName || "Akun TikTok"}
+                                          </div>
+                                          <div className="text-xs text-slate-500 truncate">
+                                            Brand: {acc.brandName || "-"}
+                                          </div>
+                                        <div
+                                          className={
+                                            "inline-flex items-center gap-1.5 mt-1 px-2.5 py-1 rounded-full border text-xs font-semibold " +
+                                            (accReadyList.length > 0
+                                              ? "bg-rose-50 text-rose-700 border-rose-200"
+                                              : "bg-emerald-50 text-emerald-700 border-emerald-200")
+                                          }
+                                        >
+                                          {accReadyList.length} video siap posting
+                                          </div>
+                                        </div>
+                                      </div>
+          
+                                      <div className="pt-2 border-t border-slate-200/80 flex justify-end">
+                                        <button
+                                          type="button"
+                                          onClick={() => setPublisherAccountPopup(acc)}
+                                          className="px-3.5 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold transition cursor-pointer"
+                                        >
+                                          Buka Akun
+                                        </button>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+          
+                          <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 space-y-4">
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                              <div>
+                                <h2 className="text-sm font-bold text-slate-900">
+                                  {publisherOrderTab === "history"
+                                    ? "Riwayat Order Sudah Diposting"
+                                    : "Daftar Orderan Siap Posting"}
+                                </h2>
+                                <p className="text-xs text-slate-500">
+                                  {publisherOrderTab === "history"
+                                    ? "Daftar konten yang telah selesai diposting."
+                                    : "Daftar konten siap untuk diposting ke platform."}
+                                </p>
+                              </div>
+          
+                              <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl">
+                                <button
+                                  type="button"
+                                  onClick={() => setPublisherOrderTab("ready")}
+                                  className={
+                                    "px-3.5 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer " +
+                                    (publisherOrderTab === "ready"
+                                      ? "bg-white text-rose-700 shadow-xs"
+                                      : "text-slate-600 hover:text-slate-900")
+                                  }
+                                >
+                                  Siap Posting ({readyOrdersAll.length})
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setPublisherOrderTab("history")}
+                                  className={
+                                    "px-3.5 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer " +
+                                    (publisherOrderTab === "history"
+                                      ? "bg-white text-sky-700 shadow-xs"
+                                      : "text-slate-600 hover:text-slate-900")
+                                  }
+                                >
+                                  Riwayat ({postedOrdersAll.length})
+                                </button>
+                              </div>
+                            </div>
+          
+                            {visiblePublisherOrders.length === 0 ? (
+                              <div className="rounded-xl border border-dashed border-slate-200 p-8 text-center text-xs text-slate-500">
+                                {publisherOrderTab === "history"
+                                  ? "Belum ada riwayat order yang sudah diposting."
+                                  : "Belum ada order yang siap posting saat ini."}
+                              </div>
+                            ) : (
+                              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                {visiblePublisherOrders.map((ord) => {
+                                  const posted = isOrderPostedItem(ord);
+                                  return (
+                                    <div
+                                      key={ord.docId || ord.id}
+                                      onClick={() => {
+                                        if (typeof setSelectedOrderId === "function") {
+                                          setSelectedOrderId(ord.docId || ord.id);
+                                        }
+                                      }}
+                                      className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xs hover:border-sky-400 transition flex flex-col justify-between gap-3 cursor-pointer"
+                                    >
+                                      <div className="space-y-2">
+                                        <div className="flex items-center justify-between gap-2">
+                                          <span className="px-2.5 py-0.5 rounded-lg bg-slate-100 text-slate-700 text-[11px] font-bold truncate">
+                                            {ord.id || "-"} • {ord.brand || "-"}
+                                          </span>
+                                          <span
+                                            className={
+                                              "px-2.5 py-0.5 rounded-full border text-[11px] font-semibold shrink-0 " +
+                                              (posted
+                                                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                                : "bg-rose-50 text-rose-700 border-rose-200")
+                                            }
+                                          >
+                                            {posted ? "Sudah Diposting" : "Siap Posting"}
+                                          </span>
+                                        </div>
+                                        <h3 className="text-sm font-bold text-slate-900 line-clamp-1">
+                                          {ord.title || "Tanpa Judul"}
+                                        </h3>
+                                        <p className="text-xs text-slate-500 line-clamp-2">
+                                          {ord.accountName || ord.platform || "TikTok"}
+                                        </p>
+                                      </div>
+          
+                                      <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between gap-2">
+                                        <span className="text-[11px] text-slate-500 truncate">
+                                          {ord.contentType || ord.aspectRatio || "-"}
+                                        </span>
+          
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            if (typeof setSelectedOrderId === "function") {
+                                              setSelectedOrderId(ord.docId || ord.id);
+                                            }
+                                          }}
+                                          className="px-3 py-1 rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 text-xs font-semibold transition cursor-pointer"
+                                        >
+                                          Detail
+                                        </button>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+          
+                          {publisherSummaryPopup && (() => {
+                            const isHistoryPopup = publisherSummaryPopup === "history";
+                            const popupList = isHistoryPopup ? postedOrdersAll : readyOrdersAll;
+                            return (
+                              <div
+                                onClick={() => setPublisherSummaryPopup(null)}
+                                className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4"
+                              >
+                                <div
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="bg-white rounded-2xl border border-slate-200 max-w-2xl w-full max-h-[85vh] flex flex-col overflow-hidden shadow-xl"
+                                >
+                                  <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+                                    <div>
+                                      <h3 className="text-base font-bold text-slate-900">
+                                        {isHistoryPopup
+                                          ? "Sudah Diposting (Riwayat)"
+                                          : "Total Order Siap Posting"}
+                                      </h3>
+                                      <p className="text-xs text-slate-500">
+                                        {isHistoryPopup
+                                          ? `Total konten yang sudah dipublikasikan (${popupList.length} konten)`
+                                          : `Konten lolos kurasi dan siap diposting (${popupList.length} konten)`}
+                                      </p>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => setPublisherSummaryPopup(null)}
+                                      className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 cursor-pointer"
+                                    >
+                                      <X className="w-4 h-4" />
+                                    </button>
+                                  </div>
+          
+                                  <div className="p-5 overflow-y-auto space-y-3 flex-1">
+                                    {popupList.length === 0 ? (
+                                      <div className="rounded-xl border border-dashed border-slate-200 p-8 text-center text-xs text-slate-500">
+                                        {isHistoryPopup
+                                          ? "Belum ada konten yang sudah dipublikasikan."
+                                          : "Belum ada konten yang siap diposting."}
+                                      </div>
+                                    ) : (
+                                      popupList.map((ord) => (
+                                        <div
+                                          key={ord.docId || ord.id}
+                                          className="rounded-xl border border-slate-200 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                                        >
+                                          <div className="space-y-0.5 min-w-0">
+                                            <div className={
+                                              "text-[11px] font-bold " +
+                                              (isHistoryPopup ? "text-sky-700" : "text-emerald-700")
+                                            }>
+                                              {ord.id || "-"} • {ord.brand || "-"}
+                                            </div>
+                                            <div className="text-sm font-bold text-slate-900 truncate">
+                                              {ord.title || "Tanpa Judul"}
+                                            </div>
+                                            <div className="text-xs text-slate-500 truncate">
+                                              {ord.accountName || ord.platform || "TikTok"} • {ord.contentType || "-"}
+                                            </div>
+                                          </div>
+          
+                                          <div className="flex items-center gap-2 shrink-0">
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                setPublisherSummaryPopup(null);
+                                                if (typeof setSelectedOrderId === "function") {
+                                                  setSelectedOrderId(ord.docId || ord.id);
+                                                }
+                                              }}
+                                              className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 text-xs font-semibold cursor-pointer"
+                                            >
+                                              Detail
+                                            </button>
+          
+                                          </div>
+                                        </div>
+                                      ))
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })()}
+          
+                          {publisherAccountPopup && (
+                            <div
+                              onClick={() => setPublisherAccountPopup(null)}
+                              className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4"
+                            >
+                              <div
+                                onClick={(e) => e.stopPropagation()}
+                                className="bg-white rounded-2xl border border-slate-200 max-w-2xl w-full max-h-[85vh] flex flex-col overflow-hidden shadow-xl"
+                              >
+                                <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+                                  <div>
+                                    <h3 className="text-base font-bold text-slate-900">
+                                      {publisherAccountPopup.accountName || publisherAccountPopup.brandName || "Akun TikTok"}
+                                    </h3>
+                                    <p className="text-xs text-slate-500">
+                                      Daftar konten siap posting ({popupAccountReadyList.length} video siap posting)
+                                    </p>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => setPublisherAccountPopup(null)}
+                                    className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 cursor-pointer"
+                                  >
+                                    <X className="w-4 h-4" />
+                                  </button>
+                                </div>
+          
+                                <div className="p-5 overflow-y-auto space-y-3 flex-1">
+                                  {popupAccountReadyList.length === 0 ? (
+                                    <div className="rounded-xl border border-dashed border-slate-200 p-8 text-center text-xs text-slate-500">
+                                      0 video siap posting pada akun ini.
+                                    </div>
+                                  ) : (
+                                    popupAccountReadyList.map((ord) => (
+                                      <div
+                                        key={ord.docId || ord.id}
+                                        className="rounded-xl border border-slate-200 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                                      >
+                                        <div className="space-y-0.5 min-w-0">
+                                          <div className="text-[11px] font-bold text-emerald-700">
+                                            {ord.id || "-"} • {ord.brand || "-"}
+                                          </div>
+                                          <div className="text-sm font-bold text-slate-900 truncate">
+                                            {ord.title || "Tanpa Judul"}
+                                          </div>
+                                          <div className="text-xs text-slate-500 truncate">
+                                            {ord.platform || "TikTok"} • {ord.contentType || "-"}
+                                          </div>
+                                        </div>
+          
+                                        <div className="flex items-center gap-2 shrink-0">
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setPublisherAccountPopup(null);
+                                              if (typeof setSelectedOrderId === "function") {
+                                                setSelectedOrderId(ord.docId || ord.id);
+                                              }
+                                            }}
+                                            className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 text-xs font-semibold cursor-pointer"
+                                          >
+                                            Detail
+                                          </button>
+          
+                                        </div>
+                                      </div>
+                                    ))
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    }
+          
+          
+          
+                    return (
+                      <>
+                        <div className={summaryGridClass}>
+                          {summaryCardsConfig.map((card) => (
+                            <button
+                              key={card.key}
+                              type="button"
+                              onClick={() => setSummaryPopupKey(card.key)}
+                              className={card.cardClass}
+                            >
+                              <div className={card.labelClass}>{card.title}</div>
+                              <div className={card.valueClass}>{card.count}</div>
+                            </button>
+                          ))}
+                        </div>
+          
+                        {activeCardCfg && (
+                          <div
+                            onClick={() => setSummaryPopupKey(null)}
+                            className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-[1px] flex items-center justify-center p-4"
+                          >
+                            <div
+                              onClick={(e) => e.stopPropagation()}
+                              className="bg-white rounded-2xl border border-slate-200 shadow-xl w-full max-w-2xl max-h-[82vh] flex flex-col overflow-hidden"
+                            >
+                              <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
+                                <div className="flex items-baseline gap-2.5">
+                                  <h3 className="text-base font-bold text-slate-900">{activeCardCfg.title}</h3>
+                                  <span className="text-xs font-medium text-slate-500">
+                                    {popupOrders.length} konten
+                                  </span>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => setSummaryPopupKey(null)}
+                                  className="px-3 py-1 rounded-lg border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+                                >
+                                  Tutup
+                                </button>
+                              </div>
+          
+                              <div className="p-5 overflow-y-auto space-y-2.5">
+                                {popupOrders.length === 0 ? (
+                                  <div className="rounded-xl border border-dashed border-slate-300 p-8 text-center text-xs text-slate-500">
+                                    Belum ada konten untuk kategori {activeCardCfg.title}.
+                                  </div>
+                                ) : (
+                                  popupOrders.map((ord) => {
+                                    const isPostedItemDone = isPostedItem(ord);
+                                    const isReadyItem = !isPostedItemDone && String(ord?.status || "").trim() === "Selesai";
+                                    const badgeText = isPostedItemDone
+                                      ? "Terposting"
+                                      : isReadyItem
+                                      ? "Siap Posting"
+                                      : ord?.status || "Antrean";
+          
+                                    return (
+                                      <div
+                                        key={ord.docId || ord.id}
+                                        onClick={() => {
+                                          if (typeof setShowEditorSubmitTab === "function") setShowEditorSubmitTab(false);
+                                          if (typeof setShowRevisionInput === "function") setShowRevisionInput(false);
+                                          if (typeof setSelectedOrderId === "function") setSelectedOrderId(ord.docId || ord.id);
+                                          setSummaryPopupKey(null);
+                                        }}
+                                        className="p-3.5 rounded-xl border border-slate-200 hover:border-sky-300 hover:bg-sky-50/40 transition flex items-center justify-between gap-3 cursor-pointer"
+                                      >
+                                        <div className="min-w-0 space-y-1">
+                                          <div className="flex items-center gap-2 flex-wrap">
+                                            <span className="text-[11px] font-bold text-sky-700 bg-sky-50 px-2 py-0.5 rounded-md">
+                                              {ord.id || "ORDER"}
+                                            </span>
+                                            <span className="text-[11px] font-semibold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-full">
+                                              {badgeText}
+                                            </span>
+                                          </div>
+                                          <div className="text-sm font-bold text-slate-900 truncate">
+                                            {ord.title || "Untitled Order"}
+                                          </div>
+                                          <div className="text-xs text-slate-500 truncate">
+                                            {ord.accountName || ord.brand || "-"} • {ord.platform || "TikTok"}
+                                          </div>
+                                        </div>
+                                        <span className="text-xs font-semibold text-sky-700 shrink-0">Detail →</span>
+                                      </div>
+                                    );
+                                  })
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
+          
+          
+                    {/* Grid Card Akun TikTok (Real-Time dari Firestore) */}
+                    {canViewAllTiktokAccounts(currentUser?.role) && !(String((typeof currentUser !== "undefined" && currentUser?.role) || (typeof activeRole !== "undefined" ? activeRole : "") || "").trim().toLowerCase().includes("publisher") || String((typeof currentUser !== "undefined" && currentUser?.role) || (typeof activeRole !== "undefined" ? activeRole : "") || "").trim().toLowerCase() === "pub" || String((typeof currentUser !== "undefined" && currentUser?.role) || (typeof activeRole !== "undefined" ? activeRole : "") || "").trim().toLowerCase() === "penerbit") && (
+                    <section className="space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-baseline gap-2.5">
+                          {(String((typeof currentUser !== "undefined" && currentUser?.role) || (typeof activeRole !== "undefined" ? activeRole : "") || "").trim().toLowerCase().includes("publisher") || String((typeof currentUser !== "undefined" && currentUser?.role) || (typeof activeRole !== "undefined" ? activeRole : "") || "").trim().toLowerCase() === "pub" || String((typeof currentUser !== "undefined" && currentUser?.role) || (typeof activeRole !== "undefined" ? activeRole : "") || "").trim().toLowerCase() === "penerbit") ? (
+          
+                            <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-8 text-center space-y-1">
+          
+                              <p className="text-sm font-semibold text-slate-700">Area Akun TikTok Publisher</p>
+          
+                              <p className="text-xs text-slate-400">Dikosongkan sementara menunggu penyesuaian tampilan Publisher.</p>
+          
+                            </div>
+          
+                          ) : (
+          
+                            <>
+          
+                            <h2 className="text-base font-bold text-slate-900">Akun TikTok</h2>
+                          <span className="text-xs font-medium text-slate-500">
+                            {(tiktokAccounts?.length ?? 0)} akun
+                          </span>
+                        </>
+                        )}
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span className="hidden sm:inline text-[11px] text-slate-400">
+                            Sinkron real-time • Klik "Buka akun" untuk kelola jenis konten & monitoring order
+                          </span>
+                        </div>
+                      </div>
+          
+                      {(tiktokAccounts?.length ?? 0) === 0 ? (
+                        <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-6 text-center space-y-2">
+                          <p className="text-sm font-semibold text-slate-700">Belum ada akun TikTok terdaftar</p>
+                          <p className="text-xs text-slate-500">
+                            {canCreateTiktokAccount(currentUser?.role)
+                              ? 'Klik tombol "+ Tambah Akun TikTok" di atas untuk menambahkan akun pertama Anda.'
+                              : "Penambahan akun TikTok baru hanya dapat dilakukan oleh Brand Manager."}
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                          {(Array.isArray(tiktokAccounts) ? tiktokAccounts : []).map((account, idx) => {
+                            const accountOrders = (Array.isArray(orders) ? orders : []).filter((ord) =>
+                              isOrderMatchedToTiktokAccount(ord, account)
+                            );
+                            const isProductionViewer = String(
+                              (typeof currentUser !== "undefined" && currentUser?.role) ||
+                                (typeof activeRole !== "undefined" ? activeRole : "") ||
+                                ""
+                            )
+                              .trim()
+                              .toLowerCase()
+                              .includes("production");
+          
+                            const isReadyOrPostedOrder = (ord) => {
+                              if (!ord) return false;
+                              const stLow = String(ord?.status || "").trim().toLowerCase();
+                              const posted =
+                                Boolean(ord?.isPosted) ||
+                                Boolean(ord?.postedAt) ||
+                                stLow === "sudah diposting" ||
+                                stLow === "sudah diupload" ||
+                                stLow === "sudah di-upload" ||
+                                stLow === "terposting";
+                              const ready = stLow === "selesai" || stLow === "siap posting";
+                              return posted || ready;
+                            };
+          
+                            const viewerRoleText = String(
+                              (typeof currentUser !== "undefined" && currentUser?.role) ||
+                                (typeof activeRole !== "undefined" ? activeRole : "") ||
+                                ""
+                            )
+                              .trim()
+                              .toLowerCase();
+                            const isSmmCardViewer =
+                              viewerRoleText.includes("sosial media") ||
+                              viewerRoleText.includes("social media") ||
+                              viewerRoleText === "smm" ||
+                              viewerRoleText === "sosmed";
+          
+                            const isPostedCardOrder = (ord) => {
+                              if (!ord) return false;
+                              const stLow = String(ord?.status || "").trim().toLowerCase();
+                              return (
+                                Boolean(ord?.isPosted) ||
+                                Boolean(ord?.postedAt) ||
+                                stLow === "sudah diposting" ||
+                                stLow === "sudah diupload" ||
+                                stLow === "sudah di-upload" ||
+                                stLow === "terposting"
+                              );
+                            };
+          
+                            const readyToPostCount = accountOrders.filter((ord) => {
+                              if (!ord || isPostedCardOrder(ord)) return false;
+                              const stLow = String(ord?.status || "").trim().toLowerCase();
+                              return stLow === "siap posting" || stLow === "selesai";
+                            }).length;
+          
+                            const inProductionCount = accountOrders.filter(
+                              (ord) => !isReadyOrPostedOrder(ord)
+                            ).length;
+          
+                            const needsReviewCount = accountOrders.filter((ord) => {
+                              if (!ord || isPostedCardOrder(ord)) return false;
+                              const st = String(ord?.status || "").trim();
+                              return st === "Review" || st === "Kurasi BM";
+                            }).length;
+          
+                            const cardMetricCount = isProductionViewer
+                              ? inProductionCount
+                              : isSmmCardViewer
+                              ? readyToPostCount
+                              : needsReviewCount;
+                            const cardMetricLabel = isProductionViewer
+                              ? "video dalam produksi"
+                              : isSmmCardViewer
+                              ? "video siap posting"
+                              : "video yang harus di review";
+                            const tags = sanitizeContentTypes(
+                              Array.isArray(account.contentTypes) ? account.contentTypes : []
+                            );
+          
+                            return (
+                              <div
+                                key={String(account.docId || account.id || account.accountName || idx) + "_" + idx}
+                                className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs hover:border-slate-300 transition flex flex-col justify-between gap-4"
+                              >
+                                <div className="space-y-3">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="flex items-center gap-3 min-w-0 flex-1">
+                                      <div className="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center font-bold text-sm shrink-0 overflow-hidden">
+                                        {(account?.logoUrl || account?.brandLogo) ? (
+                                          <img
+                                            src={account.logoUrl || account.brandLogo}
+                                            alt={account?.accountName || account?.brandName || "Logo Akun"}
+                                            className="w-full h-full object-cover"
+                                          />
+                                        ) : (
+                                          "♪"
+                                        )}
+                                      </div>
+                                      <div className="min-w-0 flex-1">
+                                        <div className="font-bold text-sm text-slate-900 truncate">
+                                          {account.accountName || account.brandName}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </div>
+          
+                                  <div className="flex items-center justify-between gap-2 text-xs">
+                                    <span className="font-medium text-slate-600 truncate">
+                                      {account.brandName || "-"}
+                                    </span>
+                                    <span className="text-[11px] text-slate-400 shrink-0">
+                                      {cardMetricCount} {cardMetricLabel}
+                                    </span>
+                                  </div>
+          
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {tags.length > 0 ? (
+                                      tags.map((tag) => (
+                                        <span
+                                          key={tag}
+                                          className="px-2.5 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200/80 text-[11px] font-medium"
+                                        >
+                                          {tag}
+                                        </span>
+                                      ))
+                                    ) : (
+                                      <span className="text-[11px] text-slate-400">Belum ada jenis konten</span>
+                                    )}
+                                  </div>
+                                </div>
+          
+                                <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
+                                  <span
+                                    className={
+                                      "px-2.5 py-1 rounded-md text-xs font-semibold " +
+                                      (cardMetricCount > 0
+                                        ? (isProductionViewer
+                                            ? "bg-amber-50 text-amber-700 border border-amber-200"
+                                            : "bg-emerald-50 text-emerald-700 border border-emerald-200")
+                                        : "bg-slate-100 text-slate-600")
+                                    }
+                                  >
+                                    {cardMetricCount} {cardMetricLabel}
+                                  </span>
+          
+                                  <button
+                                    type="button"
+                                    onClick={() => openTiktokAccountManager(account, "monitoring")}
+                                    className="inline-flex items-center gap-1 text-xs font-semibold text-slate-700 hover:text-sky-700 transition cursor-pointer"
+                                  >
+                                    <span>Buka akun</span>
+                                    <ChevronRight className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </section>
+                    )}
+          
+                    {/* Grid Card Jenis Konten khusus Role Editor */}
+                    {(() => {
+                      const roleNow = String(
+                        (typeof currentUser !== "undefined" && currentUser?.role) ||
+                          (typeof activeRole !== "undefined" ? activeRole : "") ||
+                          ""
+                      )
+                        .trim()
+                        .toLowerCase();
+                      if (!roleNow.includes("editor")) return null;
+          
+                      const normType = (val) =>
+                        String(val || "")
+                          .trim()
+                          .toLowerCase();
+          
+                      const extractOrderTypes = (ord) => {
+                        const rawList = [];
+                        if (Array.isArray(ord?.contentTypes)) rawList.push(...ord.contentTypes);
+                        for (const key of [
+                          "contentType",
+                          "jenisKonten",
+                          "tipeKonten",
+                          "category",
+                          "contentCategory",
+                        ]) {
+                          if (ord && ord[key]) rawList.push(ord[key]);
+                        }
+                        const cleaned =
+                          typeof sanitizeContentTypes === "function"
+                            ? sanitizeContentTypes(rawList)
+                            : rawList.map((x) => String(x || "").trim()).filter(Boolean);
+                        return Array.from(new Set(cleaned));
+                      };
+          
+                      const accountTypesRaw = (Array.isArray(tiktokAccounts) ? tiktokAccounts : []).flatMap(
+                        (acc) => (Array.isArray(acc?.contentTypes) ? acc.contentTypes : [])
+                      );
+                      const cleanedAccountTypes =
+                        typeof sanitizeContentTypes === "function"
+                          ? sanitizeContentTypes(accountTypesRaw)
+                          : accountTypesRaw.map((x) => String(x || "").trim()).filter(Boolean);
+          
+                      const visibleEditorOrders = (Array.isArray(orders) ? orders : []).filter((ord) => {
+                        if (!ord) return false;
+                        if (typeof currentUser !== "undefined" && currentUser) {
+                          return isOrderVisibleToCurrentEditor(ord, currentUser);
+                        }
+                        return true;
+                      });
+          
+                      const typeMap = new Map();
+                      for (const t of cleanedAccountTypes) {
+                        const key = normType(t);
+                        if (key && !typeMap.has(key)) {
+                          typeMap.set(key, { label: t, orders: [] });
+                        }
+                      }
+          
+                      for (const ord of visibleEditorOrders) {
+                        const oTypes = extractOrderTypes(ord);
+                        for (const t of oTypes) {
+                          const key = normType(t);
+                          if (!key) continue;
+                          if (!typeMap.has(key)) {
+                            typeMap.set(key, { label: t, orders: [] });
+                          }
+                          typeMap.get(key).orders.push(ord);
+                        }
+                      }
+          
+                      const contentTypeCards = Array.from(typeMap.values()).map((entry) => {
+                        const queueAndRevisionOrders = (entry.orders || []).filter((ord) => {
+                          const st = String(ord?.status || "").trim();
+                          return st === "Antrean" || st === "Revisi";
+                        });
+                        return {
+                          ...entry,
+                          orders: queueAndRevisionOrders,
+                          queueOrRevisionCount: queueAndRevisionOrders.length,
+                        };
+                      });
+          
+                      const activePopupGroup = editorContentPopupType
+                        ? contentTypeCards.find(
+                            (item) => normType(item.label) === normType(editorContentPopupType)
+                          ) || {
+                            label: editorContentPopupType,
+                            orders: (Array.isArray(orders) ? orders : []).filter((ord) => {
+                              if (!ord) return false;
+                              const st = String(ord?.status || "").trim();
+                              if (st !== "Antrean" && st !== "Revisi") return false;
+                              if (typeof currentUser !== "undefined" && currentUser && !isOrderVisibleToCurrentEditor(ord, currentUser)) {
+                                return false;
+                              }
+                              return extractOrderTypes(ord).some(
+                                (t) => normType(t) === normType(editorContentPopupType)
+                              );
+                            }),
+                            queueOrRevisionCount: 0,
+                          }
+                        : null;
+          
+                      return (
+                        <>
+                          <section className="space-y-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-baseline gap-2.5">
+                                <h2 className="text-base font-bold text-slate-900">Jenis Konten</h2>
+                                <span className="text-xs font-medium text-slate-500">
+                                  {contentTypeCards.length} jenis konten
+                                </span>
+                              </div>
+                              {selectedEditorContentType !== "Semua" && (
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedEditorContentType("Semua")}
+                                  className="text-xs font-semibold text-sky-700 hover:text-sky-800 cursor-pointer"
+                                >
+                                  Tampilkan semua jenis konten
+                                </button>
+                              )}
+                            </div>
+          
+                            {contentTypeCards.length === 0 ? (
+                              <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-6 text-center">
+                                <p className="text-sm font-semibold text-slate-700">
+                                  Belum ada jenis konten terdaftar pada akun TikTok
+                                </p>
+                              </div>
+                            ) : (
+                              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                                {contentTypeCards.map((item) => {
+                                  const isSelected =
+                                    normType(selectedEditorContentType) === normType(item.label);
+                                  const orderCount = item.orders.length;
+          
+                                  const handleSelectContentType = () => {
+                                    setSelectedEditorContentType(item.label);
+                                    setEditorContentPopupType(item.label);
+                                  };
+          
+                                  return (
+                                    <div
+                                      key={item.label}
+                                      role="button"
+                                      tabIndex={0}
+                                      onClick={handleSelectContentType}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter" || e.key === " ") {
+                                          e.preventDefault();
+                                          handleSelectContentType();
+                                        }
+                                      }}
+                                      className={
+                                        "text-left rounded-2xl border p-5 shadow-xs transition flex flex-col justify-between gap-3 cursor-pointer " +
+                                        (isSelected
+                                          ? "bg-sky-50/70 border-sky-500 ring-2 ring-sky-500/20"
+                                          : "bg-white border-slate-200 hover:border-slate-300")
+                                      }
+                                    >
+                                      <div className="space-y-2">
+                                        <div className="flex items-center justify-between gap-2">
+                                          <span className="font-bold text-sm text-slate-900">
+                                            {item.label}
+                                          </span>
+                                          {isSelected && (
+                                            <span className="px-2 py-0.5 rounded-md bg-sky-600 text-white text-[10px] font-semibold">
+                                              Dipilih
+                                            </span>
+                                          )}
+                                        </div>
+                                        <p className="text-xs text-slate-500">
+                                          Klik untuk melihat daftar order Antrean & Revisi
+                                        </p>
+                                      </div>
+          
+                                      <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
+                                        <span
+                                          className={
+                                            "px-2.5 py-1 rounded-md text-xs font-semibold " +
+                                            (orderCount > 0
+                                              ? "bg-amber-50 text-amber-800 border border-amber-200"
+                                              : "bg-slate-100 text-slate-600")
+                                          }
+                                        >
+                                          {orderCount} video order
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleSelectContentType();
+                                          }}
+                                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold cursor-pointer"
+                                        >
+                                          <span>Pilih</span>
+                                          <ChevronRight className="w-3.5 h-3.5" />
+                                        </button>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </section>
+          
+                          {activePopupGroup && (
+                            <div
+                              className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4"
+                              onClick={() => setEditorContentPopupType(null)}
+                            >
+                              <div
+                                className="bg-white rounded-2xl border border-slate-200 max-w-xl w-full p-6 shadow-xl space-y-4 max-h-[85vh] flex flex-col"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div className="flex items-start justify-between gap-3">
+                                  <div>
+                                    <div className="inline-flex items-center gap-2 flex-wrap">
+                                      <h3 className="font-bold text-base text-slate-900">
+                                        Order Jenis Konten: {activePopupGroup.label}
+                                      </h3>
+                                      <span className="px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200 text-xs font-semibold">
+                                        {activePopupGroup.orders.length} order
+                                      </span>
+                                    </div>
+                                    <p className="text-xs text-slate-500 mt-0.5">
+                                      Daftar order berstatus Antrean & Revisi. Pilih order yang ingin dikerjakan.
+                                    </p>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditorContentPopupType(null)}
+                                    className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"
+                                  >
+                                    <X className="w-4 h-4" />
+                                  </button>
+                                </div>
+          
+                                <div className="overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-xl">
+                                  {activePopupGroup.orders.length === 0 ? (
+                                    <div className="p-6 text-center text-sm text-slate-500">
+                                      Tidak ada order berstatus Antrean atau Revisi untuk jenis konten ini.
+                                    </div>
+                                  ) : (() => {
+                                    const roleText = String(
+                                      (typeof currentUser !== "undefined" && currentUser?.role) ||
+                                        (typeof activeRole !== "undefined" ? activeRole : "") ||
+                                        ""
+                                    )
+                                      .trim()
+                                      .toLowerCase();
+                                    const editorModeActive =
+                                      Boolean(typeof isEditor !== "undefined" && isEditor) ||
+                                      roleText.includes("editor");
+          
+                                    const renderPopupOrderRow = (ord) => {
+                                      const stLabel = String(ord?.status || "Antrean").trim();
+                                      const isRev = stLabel === "Revisi";
+                                      const rawAcc = String(
+                                        ord?.accountName || ord?.tiktokAccountName || ord?.brand || "-"
+                                      ).trim();
+                                      const handleAcc = rawAcc
+                                        ? rawAcc.startsWith("@")
+                                          ? rawAcc
+                                          : `@${rawAcc}`
+                                        : "-";
+                                      const kindLabel = String(
+                                        ord?.contentType || ord?.type || ord?.contentCategory || ""
+                                      ).trim();
+          
+                                      return (
+                                        <div
+                                          key={ord.docId || ord.id}
+                                          onClick={() => {
+                                            if (typeof setShowEditorSubmitTab === "function") {
+                                              setShowEditorSubmitTab(false);
+                                            }
+                                            if (typeof setShowRevisionInput === "function") {
+                                              setShowRevisionInput(false);
+                                            }
+                                            if (typeof setSelectedOrderId === "function") {
+                                              setSelectedOrderId(ord.docId || ord.id);
+                                            }
+                                            setEditorContentPopupType(null);
+                                          }}
+                                          className="p-3.5 hover:bg-slate-50 transition flex items-center justify-between gap-3 cursor-pointer"
+                                        >
+                                          <div className="min-w-0 space-y-1">
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                              <span className="font-semibold text-sm text-slate-900 truncate">
+                                                {ord.title || ord.judul || ord.id || "Order Video"}
+                                              </span>
+                                              <span
+                                                className={
+                                                  "px-2 py-0.5 rounded-md text-[11px] font-semibold " +
+                                                  (isRev
+                                                    ? "bg-rose-50 text-rose-700 border border-rose-200"
+                                                    : "bg-sky-50 text-sky-700 border border-sky-200")
+                                                }
+                                              >
+                                                {stLabel}
+                                              </span>
+                                            </div>
+                                            <div className="text-xs text-slate-500 truncate">
+                                              {handleAcc} • {ord.platform || "TikTok"}
+                                              {kindLabel ? `-${kindLabel}` : ""}
+                                              {ord.deadline ? ` • Deadline: ${ord.deadline}` : ""}
+                                            </div>
+                                          </div>
+                                          <span className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold shrink-0">
+                                            Kerjakan
+                                          </span>
+                                        </div>
+                                      );
+                                    };
+          
+                                    if (!editorModeActive) {
+                                      return activePopupGroup.orders.map(renderPopupOrderRow);
+                                    }
+          
+                                    const groupedMap = new Map();
+                                    activePopupGroup.orders.forEach((ord) => {
+                                      const rawAcc = String(
+                                        ord?.accountName || ord?.tiktokAccountName || ord?.brand || "Tanpa Akun"
+                                      ).trim();
+                                      const handleAcc = rawAcc
+                                        ? rawAcc.startsWith("@")
+                                          ? rawAcc
+                                          : `@${rawAcc}`
+                                        : "@akun";
+                                      const kindLabel = String(
+                                        ord?.contentType ||
+                                          ord?.type ||
+                                          ord?.contentCategory ||
+                                          activePopupGroup?.label ||
+                                          "Umum"
+                                      ).trim();
+                                      const groupKey = `${handleAcc.toLowerCase()}||${kindLabel.toLowerCase()}`;
+                                      if (!groupedMap.has(groupKey)) {
+                                        groupedMap.set(groupKey, {
+                                          key: groupKey,
+                                          accountHandle: handleAcc,
+                                          contentType: kindLabel,
+                                          items: [],
+                                        });
+                                      }
+                                      groupedMap.get(groupKey).items.push(ord);
+                                    });
+          
+                                    return (
+                                      <div className="p-3 space-y-3 bg-slate-50/60">
+                                        {Array.from(groupedMap.values()).map((grp) => (
+                                          <div
+                                            key={grp.key}
+                                            className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xs"
+                                          >
+                                            <div className="px-3.5 py-2.5 bg-slate-50 border-b border-slate-200/80 flex items-center justify-between gap-2">
+                                              <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                                                <span className="text-xs font-bold text-slate-900 truncate">
+                                                  {grp.accountHandle}
+                                                </span>
+                                                <span className="px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200 text-[11px] font-semibold">
+                                                  {grp.contentType}
+                                                </span>
+                                              </div>
+                                              <span className="text-[11px] font-semibold text-slate-500 shrink-0">
+                                                {grp.items.length} order
+                                              </span>
+                                            </div>
+                                            <div className="divide-y divide-slate-100">
+                                              {grp.items.map(renderPopupOrderRow)}
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    );
+                                  })()}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
+          
+                    {/* Grid Daftar Order Video Utama */}
+                    {(() => {
+                      if ((String((typeof currentUser !== "undefined" && currentUser?.role) || (typeof activeRole !== "undefined" ? activeRole : "") || "").trim().toLowerCase().includes("publisher") || String((typeof currentUser !== "undefined" && currentUser?.role) || (typeof activeRole !== "undefined" ? activeRole : "") || "").trim().toLowerCase() === "pub" || String((typeof currentUser !== "undefined" && currentUser?.role) || (typeof activeRole !== "undefined" ? activeRole : "") || "").trim().toLowerCase() === "penerbit")) return null;
+                      const parseOrderMs = (item) => {
+                        const raw = item?.createdAt ?? item?.timestamp ?? item?.updatedAt ?? item?.postedAt ?? null;
+                        if (!raw) return null;
+                        if (typeof raw === "number") return raw;
+                        if (typeof raw?.toMillis === "function") return raw.toMillis();
+                        if (typeof raw?.seconds === "number") return raw.seconds * 1000;
+                        const dt = Date.parse(raw);
+                        return Number.isNaN(dt) ? null : dt;
+                      };
+          
+                      const baseSource = (Array.isArray(orders) ? orders : []).filter((ord) => {
+                        if (!ord) return false;
+                        const rText = String(
+                          (typeof currentUser !== "undefined" && currentUser?.role) ||
+                            (typeof activeRole !== "undefined" ? activeRole : "") ||
+                            ""
+                        )
+                          .trim()
+                          .toLowerCase();
+                        const isBmAccount =
+                          rText.includes("brand manager") ||
+                          rText.includes("brand management") ||
+                          rText === "manager" ||
+                          rText === "admin" ||
+                          rText === "owner";
+                        if (!isBmAccount) {
+                          if (rText.includes("editor") && typeof currentUser !== "undefined" && currentUser) {
+                            return isOrderVisibleToCurrentEditor(ord, currentUser);
+                          }
+                          return true;
+                        }
+          
+                        const myUid = String(currentUser?.uid || currentUser?.id || "").trim();
+                        const myEmail = String(currentUser?.email || "").trim().toLowerCase();
+                        const myName = String(currentUser?.name || "").trim().toLowerCase();
+                        const orderUid = String(ord?.requestedByUid || "").trim();
+                        const orderEmail = String(ord?.requestedByEmail || "").trim().toLowerCase();
+                        const orderReqBy = String(ord?.requestedBy || "").trim().toLowerCase();
+          
+                        if (orderUid) return Boolean(myUid && orderUid === myUid);
+                        if (orderEmail) return Boolean(myEmail && orderEmail === myEmail);
+                        if (orderReqBy) return Boolean((myName && orderReqBy === myName) || (myEmail && orderReqBy === myEmail));
+                        return false;
+                      });
+                      const compareOldestFirst = (a, b) => {
+                        const msA = parseOrderMs(a.order);
+                        const msB = parseOrderMs(b.order);
+                        if (msA !== null && msB !== null && msA !== msB) return msA - msB;
+                        if (msA !== null && msB === null) return -1;
+                        if (msA === null && msB !== null) return 1;
+                        return a.index - b.index;
+                      };
+          
+                      const isPostedOrder = (ord) => {
+                        const stLow = String(ord?.status || "").trim().toLowerCase();
+                        return (
+                          Boolean(ord?.isPosted) ||
+                          Boolean(ord?.postedAt) ||
+                          stLow === "sudah diposting" ||
+                          stLow === "sudah diupload" ||
+                          stLow === "sudah di-upload" ||
+                          stLow === "terposting"
                         );
-                      })}
-                    </div>
-                  )}
-                </section>
-
-                {activePopupGroup && (
-                  <div
-                    className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4"
-                    onClick={() => setEditorContentPopupType(null)}
-                  >
-                    <div
-                      className="bg-white rounded-2xl border border-slate-200 max-w-xl w-full p-6 shadow-xl space-y-4 max-h-[85vh] flex flex-col"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <div className="flex items-start justify-between gap-3">
+                      };
+          
+                      const activeRoleText = String(
+                        (typeof currentUser !== "undefined" && currentUser?.role) ||
+                          (typeof activeRole !== "undefined" ? activeRole : "") ||
+                          ""
+                      )
+                        .trim()
+                        .toLowerCase();
+                      const isVideoEditorRole = activeRoleText.includes("editor");
+                      const isProductionRole =
+                        activeRoleText.includes("production") || activeRoleText.includes("produksi");
+                      const isSmmRole =
+                        activeRoleText.includes("sosial media") ||
+                        activeRoleText.includes("social media") ||
+                        activeRoleText === "smm" ||
+                        activeRoleText === "sosmed";
+          
+                      const isReadyToPostOrPostedForProduction = (ord) => {
+                        if (!ord) return false;
+                        if (isPostedOrder(ord)) return true;
+                        const stLow = String(ord?.status || "").trim().toLowerCase();
+                        return stLow === "selesai" || stLow === "siap posting";
+                      };
+          
+                      const displayedBrandOrders = (() => {
+                        const isHistoryActive = typeof showContentHistory !== "undefined" && showContentHistory;
+          
+                        if (isProductionRole) {
+                          return baseSource
+                            .map((order, index) => ({ order, index }))
+                            .filter(({ order }) => {
+                              if (!order) return false;
+                              const doneOrPosted = isReadyToPostOrPostedForProduction(order);
+                              return isHistoryActive ? doneOrPosted : !doneOrPosted;
+                            })
+                            .sort(compareOldestFirst)
+                            .map(({ order }) => order);
+                        }
+          
+                        if (isVideoEditorRole) {
+                          const isEditorActiveStatus = (ord) => {
+                            const st = String(ord?.status || "").trim();
+                            return st === "Antrean" || st === "Sedang Dikerjakan" || st === "Revisi";
+                          };
+          
+                          const matchesSelectedContentType = (ord) => {
+                            if (
+                              typeof selectedEditorContentType === "undefined" ||
+                              !selectedEditorContentType ||
+                              String(selectedEditorContentType).trim().toLowerCase() === "semua"
+                            ) {
+                              return true;
+                            }
+                            const target = String(selectedEditorContentType).trim().toLowerCase();
+                            const candidateValues = [];
+                            if (Array.isArray(ord?.contentTypes)) candidateValues.push(...ord.contentTypes);
+                            for (const key of [
+                              "contentType",
+                              "jenisKonten",
+                              "tipeKonten",
+                              "category",
+                              "contentCategory",
+                            ]) {
+                              if (ord && ord[key]) candidateValues.push(ord[key]);
+                            }
+                            return candidateValues.some(
+                              (val) => String(val || "").trim().toLowerCase() === target
+                            );
+                          };
+          
+                          if (isHistoryActive) {
+                            return baseSource
+                              .map((order, index) => ({ order, index }))
+                              .filter(({ order }) => {
+                                if (!order) return false;
+                                if (isEditorActiveStatus(order)) return false;
+                                return matchesSelectedContentType(order);
+                              })
+                              .sort(compareOldestFirst)
+                              .map(({ order }) => order);
+                          }
+          
+                          const queueList = baseSource
+                            .map((order, index) => ({ order, index }))
+                            .filter(
+                              ({ order }) =>
+                                order &&
+                                !isPostedOrder(order) &&
+                                String(order.status || "").trim() === "Antrean" &&
+                                matchesSelectedContentType(order)
+                            )
+                            .sort(compareOldestFirst)
+                            .map(({ order }) => order);
+          
+                          const workingList = baseSource
+                            .map((order, index) => ({ order, index }))
+                            .filter(
+                              ({ order }) =>
+                                order &&
+                                !isPostedOrder(order) &&
+                                String(order.status || "").trim() === "Sedang Dikerjakan" &&
+                                matchesSelectedContentType(order)
+                            )
+                            .sort(compareOldestFirst)
+                            .map(({ order }) => order);
+          
+                          const revisionList = baseSource
+                            .map((order, index) => ({ order, index }))
+                            .filter(
+                              ({ order }) =>
+                                order &&
+                                !isPostedOrder(order) &&
+                                String(order.status || "").trim() === "Revisi" &&
+                                matchesSelectedContentType(order)
+                            )
+                            .sort(compareOldestFirst)
+                            .map(({ order }) => order);
+          
+                          return [...queueList, ...workingList, ...revisionList];
+                        }
+          
+                        if (isSmmRole) {
+                          const isReviewStageForSmm = (ord) => {
+                            const stLow = String(ord?.status || "").trim().toLowerCase();
+                            return (
+                              stLow === "review" ||
+                              stLow === "kurasi bm" ||
+                              stLow === "perlu review" ||
+                              stLow.includes("review")
+                            );
+                          };
+          
+                          const isSmmReadyToPost = (ord) => {
+                            if (!ord || isPostedOrder(ord) || isReviewStageForSmm(ord)) return false;
+                            const stLow = String(ord?.status || "").trim().toLowerCase();
+                            return stLow === "siap posting" || stLow === "selesai";
+                          };
+          
+                          if (isHistoryActive) {
+                            return baseSource
+                              .map((order, index) => ({ order, index }))
+                              .filter(({ order }) => order && isPostedOrder(order))
+                              .sort(compareOldestFirst)
+                              .map(({ order }) => order);
+                          }
+          
+                          return baseSource
+                            .map((order, index) => ({ order, index }))
+                            .filter(({ order }) => isSmmReadyToPost(order))
+                            .sort(compareOldestFirst)
+                            .map(({ order }) => order);
+                        }
+          
+                        const isNeedsBmReviewOrder = (ord) => {
+                          if (!ord || isPostedOrder(ord)) return false;
+                          const st = String(ord?.status || "").trim();
+                          return st === "Review" || st === "Kurasi BM";
+                        };
+          
+                        if (isHistoryActive) {
+                          const getBmHistoryRank = (ord) => {
+                            if (!ord) return -1;
+                            if (isPostedOrder(ord)) return 1;
+                            const stLow = String(ord?.status || "").trim().toLowerCase();
+                            if (!isNeedsBmReviewOrder(ord) && (stLow === "siap posting" || stLow === "selesai")) {
+                              return 0;
+                            }
+                            return -1;
+                          };
+          
+                          return baseSource
+                            .map((order, index) => ({ order, index, historyRank: getBmHistoryRank(order) }))
+                            .filter(({ historyRank }) => historyRank === 0 || historyRank === 1)
+                            .sort((a, b) => a.historyRank - b.historyRank || compareOldestFirst(a, b))
+                            .map(({ order }) => order);
+                        }
+          
+                        return baseSource
+                          .map((order, index) => ({ order, index }))
+                          .filter(({ order }) => isNeedsBmReviewOrder(order))
+                          .sort(compareOldestFirst)
+                          .map(({ order }) => order);
+                      })();
+          
+                      return (
+                    <>
+          <section className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-4 sm:p-5 space-y-4">
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                         <div>
-                          <div className="inline-flex items-center gap-2 flex-wrap">
-                            <h3 className="font-bold text-base text-slate-900">
-                              Order Jenis Konten: {activePopupGroup.label}
-                            </h3>
-                            <span className="px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200 text-xs font-semibold">
-                              {activePopupGroup.orders.length} order
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <h2 className="text-sm sm:text-base font-bold text-slate-900">
+                              Produktivitas Tim
+                            </h2>
+                            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-sky-50 text-sky-700 border border-sky-200/70">
+                              {(productivityData.isAdminOrOwner || productivityData.canViewAllTeam) ? "Seluruh Tim" : "Akun Anda"}
                             </span>
                           </div>
                           <p className="text-xs text-slate-500 mt-0.5">
-                            Daftar order berstatus Antrean & Revisi. Pilih order yang ingin dikerjakan.
+                            {(productivityData.isAdminOrOwner || productivityData.canViewAllTeam)
+                              ? "Pantau seluruh output, antrean, proses revisi, siap posting, dan tingkat penyelesaian tim."
+                              : "Ringkasan output dan progres order konten video"}
                           </p>
+                        </div>
+          
+                        <button
+                          type="button"
+                          onClick={() => setShowProductivityPanel((prev) => !prev)}
+                          className={
+                            "px-3.5 py-1.5 rounded-xl text-xs font-semibold border transition cursor-pointer shrink-0 self-start sm:self-auto " +
+                            (showProductivityPanel
+                              ? "bg-sky-600 text-white border-sky-600"
+                              : "bg-slate-50 text-slate-700 border-slate-200 hover:border-sky-300 hover:text-sky-700")
+                          }
+                        >
+                          {showProductivityPanel ? "Tutup Rekap" : "Lihat Produktivitas"}
+                        </button>
+                      </div>
+          
+                      {showProductivityPanel && (
+                        <div className="space-y-4 pt-1 border-t border-slate-100">
+                          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2.5 pt-2">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {[
+                                { id: "today", label: "Hari Ini" },
+                                { id: "7d", label: "7 Hari" },
+                                { id: "30d", label: "30 Hari" },
+                                { id: "all", label: "Semua" },
+                              ].map((p) => (
+                                <button
+                                  key={p.id}
+                                  type="button"
+                                  onClick={() => setProductivityRange(p.id)}
+                                  className={
+                                    "px-2.5 py-1 rounded-lg text-xs font-semibold border transition cursor-pointer " +
+                                    (productivityRange === p.id
+                                      ? "bg-slate-900 text-white border-slate-900"
+                                      : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50")
+                                  }
+                                >
+                                  {p.label}
+                                </button>
+                              ))}
+                            </div>
+          
+                            <div className="flex items-center gap-2 flex-wrap">
+                              {(productivityData.isAdminOrOwner || productivityData.canViewAllTeam) && (
+                                <select
+                                  value={productivityRoleFilter}
+                                  onChange={(e) => setProductivityRoleFilter(e.target.value)}
+                                  className="px-2.5 py-1.5 rounded-xl border border-slate-200 text-xs font-medium text-slate-700 bg-white"
+                                >
+                                  <option value="Semua">Semua Role</option>
+                                  <option value="Team Produksi">Team Produksi</option>
+                                  <option value="Video Editor">Video Editor</option>
+                                  <option value="Brand Management">Brand Management</option>
+                                  <option value="Publisher">Publisher</option>
+                                </select>
+                              )}
+                              <input
+                                type="text"
+                                value={productivitySearch}
+                                onChange={(e) => setProductivitySearch(e.target.value)}
+                                placeholder="Cari nama user..."
+                                className="px-3 py-1.5 rounded-xl border border-slate-200 text-xs text-slate-700 bg-white w-full sm:w-44"
+                              />
+                            </div>
+                          </div>
+          
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                            <div className="rounded-xl bg-slate-50 border border-slate-200/70 p-3">
+                              <div className="text-[11px] font-medium text-slate-500">Total Order</div>
+                              <div className="text-lg font-bold text-slate-900 mt-0.5">{productivityData.summary.total}</div>
+                            </div>
+                            <div className="rounded-xl bg-emerald-50/70 border border-emerald-200/70 p-3">
+                              <div className="text-[11px] font-medium text-emerald-700">Selesai</div>
+                              <div className="text-lg font-bold text-emerald-800 mt-0.5">{productivityData.summary.completed}</div>
+                            </div>
+                            <div className="rounded-xl bg-indigo-50/70 border border-indigo-200/70 p-3">
+                              <div className="text-[11px] font-medium text-indigo-700">Menunggu Review</div>
+                              <div className="text-lg font-bold text-indigo-800 mt-0.5">{productivityData.summary.review}</div>
+                            </div>
+                            <div className="rounded-xl bg-amber-50/70 border border-amber-200/70 p-3">
+                              <div className="text-[11px] font-medium text-amber-800">Rasio Selesai</div>
+                              <div className="text-lg font-bold text-amber-900 mt-0.5">{productivityData.completionRate}%</div>
+                            </div>
+                          </div>
+          
+                          {productivityData.rows.length === 0 ? (
+                            <div className="rounded-xl border border-dashed border-slate-200 p-5 text-center text-xs text-slate-500">
+                              Belum ada data produktivitas pada periode atau filter yang dipilih.
+                            </div>
+                          ) : (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                              {productivityData.rows.map((row) => {
+                                const isPublisherCard = String(row?.role || "")
+                                  .trim()
+                                  .toLowerCase()
+                                  .includes("publisher");
+                                const totalCount = Math.max(0, Number(row.total) || 0);
+                                const queueCount = Math.max(0, Number(row.queue) || 0);
+                                const progCount = Math.max(0, Number(row.inProgress) || 0);
+                                const revCount = Math.max(0, Number(row.revision) || 0);
+                                const readyCount = Math.max(0, Number(row.readyToPost) || 0);
+                                const postedCount = Math.max(0, Number(row.posted) || 0);
+                                const rawDoneCount = Math.max(
+                                  0,
+                                  Number(row.completed) || (readyCount + postedCount)
+                                );
+                                const doneCount = isPublisherCard
+                                  ? Math.min(totalCount > 0 ? totalCount : postedCount, postedCount)
+                                  : rawDoneCount;
+                                const pct = isPublisherCard
+                                  ? totalCount > 0
+                                    ? Math.min(100, Math.max(0, Math.round((doneCount / totalCount) * 100)))
+                                    : 0
+                                  : Math.min(100, Math.max(0, Number(row.completionRate) || 0));
+          
+                                const denom =
+                                  totalCount > 0
+                                    ? totalCount
+                                    : Math.max(queueCount + progCount + revCount + readyCount + postedCount + doneCount, 1);
+          
+                                const isFullyDone = isPublisherCard
+                                  ? totalCount > 0 && postedCount >= totalCount
+                                  : pct >= 100 ||
+                                    (totalCount > 0 && doneCount >= totalCount && revCount === 0 && queueCount === 0);
+          
+                                const cleanPct = Math.min(100, Math.max(0, Number(pct) || 0));
+          
+                                let activeReach = 0;
+                                let activeStage = "none";
+          
+                                if (isFullyDone || cleanPct >= 100) {
+                                  activeReach = 100;
+                                  activeStage = "done";
+                                } else if (cleanPct > 0) {
+                                  activeReach = Math.min(96, Math.max(8, cleanPct));
+                                  if (revCount > 0) {
+                                    activeStage = "revision";
+                                  } else if (readyCount > 0 || postedCount > 0) {
+                                    activeStage = "ready";
+                                  } else if (progCount > 0 || (Number(row.review) || 0) > 0) {
+                                    activeStage = "progress";
+                                  } else {
+                                    activeStage = "queue";
+                                  }
+                                } else if (revCount > 0) {
+                                  activeReach = 12;
+                                  activeStage = "revision";
+                                } else if ((Number(row.review) || 0) > 0 || progCount > 0) {
+                                  activeReach = 10;
+                                  activeStage = "progress";
+                                } else if (queueCount > 0) {
+                                  activeReach = 8;
+                                  activeStage = "queue";
+                                }
+          
+                                const barStyleClass =
+                                  activeStage === "done"
+                                    ? "bg-gradient-to-r from-emerald-500 via-teal-500 to-sky-500 shadow-sm shadow-emerald-500/25"
+                                    : activeStage === "revision"
+                                    ? "bg-gradient-to-r from-amber-400 via-orange-500 to-rose-500 shadow-sm shadow-rose-500/25"
+                                    : activeStage === "ready"
+                                    ? "bg-gradient-to-r from-emerald-400 via-teal-500 to-cyan-500 shadow-sm shadow-teal-500/20"
+                                    : activeStage === "progress"
+                                    ? "bg-gradient-to-r from-sky-400 via-indigo-400 to-emerald-400 shadow-sm shadow-sky-500/20"
+                                    : activeStage === "queue"
+                                    ? "bg-gradient-to-r from-amber-300 via-amber-400 to-yellow-400 shadow-sm shadow-amber-400/20"
+                                    : "";
+          
+                                return (
+                                  <div
+                                    key={`${row.role}-${row.key}`}
+                                    className="rounded-2xl border border-slate-200/80 bg-slate-50/50 p-3.5 space-y-2.5"
+                                  >
+                                    <div className="flex items-start justify-between gap-2">
+                                      <div className="min-w-0">
+                                        <div className="text-sm font-bold text-slate-900 truncate">{row.name}</div>
+                                        <span className="inline-block mt-0.5 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-white border border-slate-200 text-slate-600">
+                                          {row.role}
+                                        </span>
+                                      </div>
+                                      <div className="text-right shrink-0">
+                                        <div className="text-xs font-bold text-emerald-700">{pct}% Selesai</div>
+                                        <div className="text-[11px] text-slate-500">{doneCount}/{totalCount} order</div>
+                                      </div>
+                                    </div>
+          
+                                    <div className="space-y-1.5">
+                                      <div className="w-full h-3 rounded-full bg-gradient-to-r from-slate-100 via-slate-200/75 to-slate-100 border border-slate-200/90 shadow-inner overflow-hidden flex items-center">
+                                        {activeReach <= 0 ? (
+                                          <span className="w-2.5 h-1.5 rounded-full bg-slate-300/90 ml-1" />
+                                        ) : (
+                                          <div
+                                            className={`h-full rounded-full ${barStyleClass} transition-all duration-500 ease-out relative flex items-center justify-end`}
+                                            style={{ width: `${activeReach}%` }}
+                                          >
+                                            <span className="absolute inset-0 bg-gradient-to-b from-white/35 via-white/10 to-transparent pointer-events-none" />
+                                            <span className="w-1.5 h-1.5 rounded-full bg-white/90 mr-1 shrink-0" />
+                                          </div>
+                                        )}
+                                      </div>
+          
+                                      {(queueCount > 0 || revCount > 0) && (
+                                        <div className="flex items-center justify-between gap-2 text-[11px] flex-wrap">
+                                          {queueCount > 0 ? (
+                                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200/80 font-semibold">
+                                              <span className="w-2 h-2 rounded-full bg-amber-400" />
+                                              Antrean: {queueCount}
+                                            </span>
+                                          ) : (
+                                            <span />
+                                          )}
+          
+                                          {revCount > 0 && (
+                                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-gradient-to-r from-orange-50 to-rose-50 text-rose-700 border border-rose-200/80 font-semibold">
+                                              <span className="w-2 h-2 rounded-full bg-gradient-to-r from-orange-500 to-rose-500" />
+                                              Revisi: {revCount}/{denom} konten
+                                            </span>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+          
+                                    <div className="flex items-center justify-between gap-2 text-[11px] text-slate-600 pt-0.5 flex-wrap">
+                                      <span>Antrean: <b>{row.queue}</b></span>
+                                      <span>Proses: <b>{row.inProgress}</b></span>
+                                      <span>Review: <b>{row.review}</b></span>
+                                      <span>Revisi: <b className="text-rose-600">{row.revision}</b></span>
+                                      <span>Siap Posting: <b className="text-emerald-700">{row.readyToPost}</b></span>
+                                      <span>Diposting: <b className="text-sky-700">{row.posted}</b></span>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </section>
+          
+                    <section className="space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-baseline gap-2.5 min-w-0">
+                          <h2 className="text-base font-bold text-slate-900 truncate">
+                            {showContentHistory ? "Riwayat Konten" : "Daftar Order Video"}
+                          </h2>
+                          <span className="text-xs font-medium text-slate-500 shrink-0">
+                            {(displayedBrandOrders?.length ?? 0)} order
+                          </span>
                         </div>
                         <button
                           type="button"
-                          onClick={() => setEditorContentPopupType(null)}
+                          onClick={() => setShowContentHistory((prev) => !prev)}
+                          className={
+                            "px-3.5 py-1.5 rounded-xl text-xs font-semibold border transition cursor-pointer shrink-0 " +
+                            (showContentHistory
+                              ? "bg-slate-900 text-white border-slate-900"
+                              : "bg-white text-slate-700 border-slate-200 hover:border-sky-300 hover:text-sky-700")
+                          }
+                        >
+                          Riwayat Konten
+                        </button>
+                      </div>
+          
+                      {(displayedBrandOrders?.length ?? 0) === 0 ? (
+                        <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-8 text-center space-y-1.5">
+                          <p className="text-sm font-semibold text-slate-700">Belum ada order video yang tampil</p>
+                          <p className="text-xs text-slate-500">
+                            Klik tombol "+ Buat Order Video" untuk membuat order baru atau ubah filter pencarian.
+                          </p>
+                        </div>
+                      ) : (() => {
+                          const roleText = String(
+                            (typeof currentUser !== "undefined" && currentUser?.role) ||
+                              (typeof activeRole !== "undefined" ? activeRole : "") ||
+                              ""
+                          )
+                            .trim()
+                            .toLowerCase();
+                          const editorModeActive =
+                            Boolean(typeof isEditor !== "undefined" && isEditor) ||
+                            roleText.includes("editor");
+          
+                          if (!editorModeActive) {
+                            return (
+                              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                          {displayedBrandOrders.map((ord) => {
+                            const stLowCard = String(ord?.status || "").trim().toLowerCase();
+                            const isPostedCard =
+                              Boolean(ord?.isPosted) ||
+                              Boolean(ord?.postedAt) ||
+                              stLowCard === "sudah diposting" ||
+                              stLowCard === "sudah diupload" ||
+                              stLowCard === "sudah di-upload" ||
+                              stLowCard === "terposting";
+                            const isReadyToPostCard =
+                              !isPostedCard &&
+                              stLowCard !== "review" &&
+                              stLowCard !== "kurasi bm" &&
+                              !stLowCard.includes("review") &&
+                              (stLowCard === "siap posting" || stLowCard === "selesai");
+                            const baseStCfg = STATUS_CONFIG[ord.status] || {
+                              label: ord.status || "Antrean",
+                              badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
+                              dotClass: "bg-slate-500",
+                            };
+                            const stCfg = isSmmRole
+                              ? isPostedCard
+                                ? {
+                                    label: "Terposting",
+                                    badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
+                                    dotClass: "bg-slate-500",
+                                  }
+                                : isReadyToPostCard
+                                ? {
+                                    label: "Siap Posting",
+                                    badgeClass: "bg-emerald-50 text-emerald-700 border-emerald-200",
+                                    dotClass: "bg-emerald-500",
+                                  }
+                                : baseStCfg
+                              : isReadyToPostCard
+                              ? {
+                                  label: "Siap Posting",
+                                  badgeClass: "bg-emerald-50 text-emerald-700 border-emerald-200",
+                                  dotClass: "bg-emerald-500",
+                                }
+                              : isPostedCard
+                              ? {
+                                  label: "Terposting",
+                                  badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
+                                  dotClass: "bg-slate-500",
+                                }
+                              : baseStCfg;
+                            const cardBorderClass = isSmmRole
+                              ? isPostedCard
+                                ? "bg-white rounded-2xl border border-slate-200 p-5 shadow-xs hover:border-slate-300 transition flex flex-col justify-between gap-3 cursor-pointer"
+                                : "bg-white rounded-2xl border border-emerald-200/80 p-5 shadow-xs hover:border-emerald-400 transition flex flex-col justify-between gap-3 cursor-pointer"
+                              : "bg-white rounded-2xl border border-slate-200 p-5 shadow-xs hover:border-sky-300 transition flex flex-col justify-between gap-3 cursor-pointer";
+                            return (
+                              <div
+                                key={ord.docId || ord.id}
+                                onClick={() => {
+                                  if (typeof setShowEditorSubmitTab === "function") setShowEditorSubmitTab(false);
+                                  if (typeof setShowRevisionInput === "function") setShowRevisionInput(false);
+                                  if (typeof setSelectedOrderId === "function") setSelectedOrderId(ord.docId || ord.id);
+                                }}
+                                className={cardBorderClass}
+                              >
+                                <div className="space-y-2">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className={
+                                      isSmmRole
+                                        ? isPostedCard
+                                          ? "text-[11px] font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-md"
+                                          : "text-[11px] font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-md"
+                                        : "text-[11px] font-bold text-sky-700 bg-sky-50 px-2 py-0.5 rounded-md"
+                                    }>
+                                      {ord.id || "ORDER"}
+                                    </span>
+                                    <span className={"inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-0.5 rounded-full border " + stCfg.badgeClass}>
+                                      <span className={"w-1.5 h-1.5 rounded-full " + stCfg.dotClass} />
+                                      {stCfg.label}
+                                    </span>
+                                  </div>
+                                  <h3 className="text-sm font-bold text-slate-900 line-clamp-2">{ord.title || "Untitled Order"}</h3>
+                                  <p className="text-xs text-slate-500 truncate">{ord.brand || "-"} • {ord.platform || "TikTok"}</p>
+                                </div>
+                                <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
+                                  <span>{ord.contentType || ord.type || "Konten"}</span>
+                                  <span className={isSmmRole && !isPostedCard ? "font-semibold text-emerald-700" : "font-semibold text-sky-700"}>
+                                    {isSmmRole && !isPostedCard ? "Posting →" : "Detail →"}
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                              </div>
+                            );
+                          }
+          
+                          const editorGroupsMap = new Map();
+                          (displayedBrandOrders || []).forEach((ord) => {
+                            const rawAcc = String(
+                              ord?.accountName || ord?.tiktokAccountName || ord?.brand || "Tanpa Akun"
+                            ).trim();
+                            const handleAcc = rawAcc
+                              ? rawAcc.startsWith("@")
+                                ? rawAcc
+                                : `@${rawAcc}`
+                              : "@akun";
+                            const kindLabel = String(
+                              ord?.contentType || ord?.type || ord?.contentCategory || "Umum"
+                            ).trim();
+                            const groupKey = `${handleAcc.toLowerCase()}||${kindLabel.toLowerCase()}`;
+                            if (!editorGroupsMap.has(groupKey)) {
+                              editorGroupsMap.set(groupKey, {
+                                key: groupKey,
+                                accountHandle: handleAcc,
+                                contentType: kindLabel,
+                                items: [],
+                              });
+                            }
+                            editorGroupsMap.get(groupKey).items.push(ord);
+                          });
+          
+                          return (
+                            <div className="space-y-6">
+                              {Array.from(editorGroupsMap.values()).map((grp) => {
+                                const displayedBrandOrders = grp.items;
+                                return (
+                                  <div
+                                    key={grp.key}
+                                    className="bg-slate-50/70 rounded-2xl border border-slate-200/90 p-4 space-y-3.5"
+                                  >
+                                    <div className="flex items-center justify-between gap-2 flex-wrap pb-2 border-b border-slate-200/80">
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <span className="text-sm font-bold text-slate-900">
+                                          {grp.accountHandle}
+                                        </span>
+                                        <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200 text-xs font-semibold">
+                                          {grp.contentType}
+                                        </span>
+                                      </div>
+                                      <span className="text-xs font-semibold text-slate-500">
+                                        {grp.items.length} order
+                                      </span>
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                          {displayedBrandOrders.map((ord) => {
+                            const stLowCard = String(ord?.status || "").trim().toLowerCase();
+                            const isPostedCard =
+                              Boolean(ord?.isPosted) ||
+                              Boolean(ord?.postedAt) ||
+                              stLowCard === "sudah diposting" ||
+                              stLowCard === "sudah diupload" ||
+                              stLowCard === "sudah di-upload" ||
+                              stLowCard === "terposting";
+                            const isReadyToPostCard =
+                              !isPostedCard &&
+                              stLowCard !== "review" &&
+                              stLowCard !== "kurasi bm" &&
+                              !stLowCard.includes("review") &&
+                              (stLowCard === "siap posting" || stLowCard === "selesai");
+                            const baseStCfg = STATUS_CONFIG[ord.status] || {
+                              label: ord.status || "Antrean",
+                              badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
+                              dotClass: "bg-slate-500",
+                            };
+                            const stCfg = isSmmRole
+                              ? isPostedCard
+                                ? {
+                                    label: "Terposting",
+                                    badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
+                                    dotClass: "bg-slate-500",
+                                  }
+                                : isReadyToPostCard
+                                ? {
+                                    label: "Siap Posting",
+                                    badgeClass: "bg-emerald-50 text-emerald-700 border-emerald-200",
+                                    dotClass: "bg-emerald-500",
+                                  }
+                                : baseStCfg
+                              : isReadyToPostCard
+                              ? {
+                                  label: "Siap Posting",
+                                  badgeClass: "bg-emerald-50 text-emerald-700 border-emerald-200",
+                                  dotClass: "bg-emerald-500",
+                                }
+                              : isPostedCard
+                              ? {
+                                  label: "Terposting",
+                                  badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
+                                  dotClass: "bg-slate-500",
+                                }
+                              : baseStCfg;
+                            const cardBorderClass = isSmmRole
+                              ? isPostedCard
+                                ? "bg-white rounded-2xl border border-slate-200 p-5 shadow-xs hover:border-slate-300 transition flex flex-col justify-between gap-3 cursor-pointer"
+                                : "bg-white rounded-2xl border border-emerald-200/80 p-5 shadow-xs hover:border-emerald-400 transition flex flex-col justify-between gap-3 cursor-pointer"
+                              : "bg-white rounded-2xl border border-slate-200 p-5 shadow-xs hover:border-sky-300 transition flex flex-col justify-between gap-3 cursor-pointer";
+                            return (
+                              <div
+                                key={ord.docId || ord.id}
+                                onClick={() => {
+                                  if (typeof setShowEditorSubmitTab === "function") setShowEditorSubmitTab(false);
+                                  if (typeof setShowRevisionInput === "function") setShowRevisionInput(false);
+                                  if (typeof setSelectedOrderId === "function") setSelectedOrderId(ord.docId || ord.id);
+                                }}
+                                className={cardBorderClass}
+                              >
+                                <div className="space-y-2">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className={
+                                      isSmmRole
+                                        ? isPostedCard
+                                          ? "text-[11px] font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-md"
+                                          : "text-[11px] font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-md"
+                                        : "text-[11px] font-bold text-sky-700 bg-sky-50 px-2 py-0.5 rounded-md"
+                                    }>
+                                      {ord.id || "ORDER"}
+                                    </span>
+                                    <span className={"inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-0.5 rounded-full border " + stCfg.badgeClass}>
+                                      <span className={"w-1.5 h-1.5 rounded-full " + stCfg.dotClass} />
+                                      {stCfg.label}
+                                    </span>
+                                  </div>
+                                  <h3 className="text-sm font-bold text-slate-900 line-clamp-2">{ord.title || "Untitled Order"}</h3>
+                                  <p className="text-xs text-slate-500 truncate">{ord.brand || "-"} • {ord.platform || "TikTok"}</p>
+                                </div>
+                                <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
+                                  <span>{ord.contentType || ord.type || "Konten"}</span>
+                                  <span className={isSmmRole && !isPostedCard ? "font-semibold text-emerald-700" : "font-semibold text-sky-700"}>
+                                    {isSmmRole && !isPostedCard ? "Posting →" : "Detail →"}
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })()}
+                    </section>
+                    </>);
+                    })()}
+                </main>
+          
+                {isNewOrderOpen && (
+                  <div className="fixed inset-0 z-40 bg-slate-900/40 flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl border border-sky-100 max-w-lg w-full p-6 shadow-xl space-y-4" style={{ backgroundImage: "linear-gradient(145deg, rgba(255, 255, 255, 0.92) 0%, rgba(240, 249, 255, 0.35) 58%, rgba(254, 243, 199, 0.38) 100%)" }}>
+                      <div className="flex items-center justify-between">
+                        <h3 className="font-bold text-base text-slate-900">Buat Order Video Vertikal (9:16)</h3>
+                        <button type="button" onClick={() => setIsNewOrderOpen(false)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"><X className="w-4 h-4" /></button>
+                      </div>
+                      <form onSubmit={(e) => { if (typeof handleCreateOrder === "function") return handleCreateOrder(e); e.preventDefault(); }} className="space-y-3.5">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                          <div className="relative">
+                            <label className="block text-xs font-semibold text-slate-700 mb-1">Akun Tiktok</label>
+                            <div className="relative">
+                              <div className="relative flex items-center">
+                                <input
+                                  type="text"
+                                  required
+                                  value={newBrand}
+                                  onClick={() => setIsTiktokDropdownOpen(true)}
+                                  onFocus={() => setIsTiktokDropdownOpen(true)}
+                                  onBlur={() => setTimeout(() => setIsTiktokDropdownOpen(false), 160)}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setNewBrand(val);
+                                    setIsTiktokDropdownOpen(true);
+                                    const found = (Array.isArray(tiktokAccounts) ? tiktokAccounts : []).find(
+                                      (acc) =>
+                                        String(acc?.accountName || "").toLowerCase() === val.trim().toLowerCase() ||
+                                        String(acc?.brandName || "").toLowerCase() === val.trim().toLowerCase()
+                                    );
+                                    if (found) {
+                                      const cleanTypes = sanitizeContentTypes(found.contentTypes);
+                                      if ((cleanTypes?.length ?? 0) > 0) {
+                                        setNewContentType(cleanTypes[0]);
+                                      }
+                                    }
+                                  }}
+                                  placeholder="Pilih atau ketik @akun / brand..."
+                                  autoComplete="off"
+                                  className="w-full px-3 py-2 pr-14 rounded-xl border border-slate-200 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/15 transition text-sm bg-white"
+                                />
+                                {newBrand && (
+                                  <button
+                                    type="button"
+                                    onMouseDown={(e) => {
+                                      e.preventDefault();
+                                      setNewBrand("");
+                                      setNewContentType("");
+                                      setIsTiktokDropdownOpen(true);
+                                    }}
+                                    title="Reset & tampilkan semua akun"
+                                    className="absolute right-2 px-1.5 py-0.5 text-[11px] font-semibold text-slate-500 hover:text-slate-800 rounded bg-slate-100 hover:bg-slate-200 transition cursor-pointer"
+                                  >
+                                    Reset
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                            {isTiktokDropdownOpen && (
+                              <div className="absolute left-0 right-0 mt-1.5 z-30 max-h-56 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-lg py-1 transition-all duration-150">
+                                {(Array.isArray(tiktokAccounts) ? tiktokAccounts : [])
+                                  .filter((acc) => {
+                                    const q = (newBrand || "").trim().toLowerCase();
+                                    if (!q) return true;
+                                    const bName = String(acc?.brandName || "").toLowerCase();
+                                    const aName = String(acc?.accountName || "").toLowerCase();
+                                    const isExactSelected = bName === q || aName === q;
+                                    if (isExactSelected) return true;
+                                    return bName.includes(q) || aName.includes(q);
+                                  })
+                                  .map((acc) => {
+                                    const cleanTypes = sanitizeContentTypes(acc.contentTypes);
+                                    return (
+                                      <button
+                                        key={acc.id}
+                                        type="button"
+                                        onMouseDown={(e) => {
+                                          e.preventDefault();
+                                          setNewBrand(acc.accountName);
+                                          setNewContentType(Array.isArray(cleanTypes) && cleanTypes.length > 0 ? cleanTypes[0] : "");
+                                          setIsTiktokDropdownOpen(false);
+                                        }}
+                                        className="w-full text-left px-3.5 py-2 hover:bg-sky-50/80 transition flex flex-col cursor-pointer border-b border-slate-50 last:border-b-0"
+                                      >
+                                        <span className="text-xs font-bold text-slate-900 leading-tight">
+                                          {acc.brandName}
+                                        </span>
+                                        <span className="text-[11px] font-medium text-sky-700 leading-tight mt-0.5">
+                                          {acc.accountName}
+                                        </span>
+                                      </button>
+                                    );
+                                  })}
+                                {(tiktokAccounts?.length ?? 0) === 0 && (
+                                  <div className="px-3.5 py-2.5 text-xs text-slate-500">
+                                    Belum ada akun TikTok. Klik "+ Tambah Akun TikTok".
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-700 mb-1">Platform</label>
+                            <select value="TikTok" onChange={() => setNewPlatform("TikTok")} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-slate-50 text-slate-800">
+                              <option value="TikTok">TikTok</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-700 mb-1">Jenis konten</label>
+                            <select
+                              value={orderModalContentTypes.includes(newContentType) ? newContentType : ""}
+                              onChange={(e) => setNewContentType(e.target.value)}
+                              disabled={orderModalContentTypes.length === 0}
+                              className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/15 transition text-sm bg-white text-slate-800 disabled:bg-slate-50 disabled:text-slate-400"
+                            >
+                              <option value="">{orderModalContentTypes.length === 0 ? "Pilih akun TikTok dulu" : "Pilih jenis konten"}</option>
+                              {orderModalContentTypes.map((ct, idx) => (
+                                <option key={String(ct) + "_" + idx} value={ct}>
+                                  {ct}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+                        {(() => {
+                          const list = Array.isArray(tiktokAccounts) ? tiktokAccounts : [];
+                          const getTypesForAcc = (acc) => {
+                            const rawTypes =
+                              typeof sanitizeContentTypes === "function"
+                                ? sanitizeContentTypes(acc?.contentTypes)
+                                : Array.isArray(acc?.contentTypes)
+                                ? acc.contentTypes
+                                : [];
+                            return (Array.isArray(rawTypes) ? rawTypes : [])
+                              .map((t) => String(t || "").trim())
+                              .filter(Boolean);
+                          };
+          
+                          const primaryAccName =
+                            (selectedOrderAccounts && selectedOrderAccounts[0]) || newBrand || "";
+                          const primaryObj = list.find(
+                            (a) =>
+                              String(a?.accountName || "").trim().toLowerCase() ===
+                                String(primaryAccName).trim().toLowerCase() ||
+                              String(a?.brandName || "").trim().toLowerCase() ===
+                                String(primaryAccName).trim().toLowerCase()
+                          );
+                          const primaryTypes = getTypesForAcc(primaryObj);
+                          const activeContentType = String(
+                            newContentType || primaryTypes[0] || ""
+                          ).trim();
+          
+                          const sameCategoryAccounts = activeContentType
+                            ? list.filter((a) =>
+                                getTypesForAcc(a).some(
+                                  (t) => t.toLowerCase() === activeContentType.toLowerCase()
+                                )
+                              )
+                            : primaryAccName
+                            ? list.filter(
+                                (a) =>
+                                  String(a?.accountName || "").trim().toLowerCase() ===
+                                  String(primaryAccName).trim().toLowerCase()
+                              )
+                            : [];
+          
+                          if (!activeContentType && sameCategoryAccounts.length === 0) return null;
+          
+                          const toggleAccountSelection = (accName) => {
+                            const cleanAcc = String(accName || "").trim();
+                            if (!cleanAcc) return;
+                            setSelectedOrderAccounts((prev) => {
+                              const base =
+                                Array.isArray(prev) && prev.length > 0
+                                  ? prev
+                                  : newBrand
+                                  ? [newBrand]
+                                  : [];
+                              const exists = base.some(
+                                (x) => String(x).toLowerCase() === cleanAcc.toLowerCase()
+                              );
+                              let next;
+                              if (exists) {
+                                if (base.length === 1) return base;
+                                next = base.filter(
+                                  (x) => String(x).toLowerCase() !== cleanAcc.toLowerCase()
+                                );
+                              } else {
+                                next = [...base, cleanAcc];
+                              }
+                              setNewBrand(next[0] || "");
+                              return next;
+                            });
+                          };
+          
+                          const currentSelected =
+                            selectedOrderAccounts && selectedOrderAccounts.length > 0
+                              ? selectedOrderAccounts
+                              : newBrand
+                              ? [newBrand]
+                              : [];
+          
+                          return (
+                            <div className="rounded-xl border border-slate-100 bg-slate-50/80 px-3 py-2 space-y-1.5">
+                              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600">
+                                <span>
+                                  Akun dengan jenis konten{" "}
+                                  <strong className="text-slate-800">{activeContentType || "-"}</strong>{" "}
+                                  <span className="text-slate-500">({currentSelected.length} dipilih)</span>
+                                </span>
+                                {sameCategoryAccounts.length > 1 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const allNames = sameCategoryAccounts
+                                        .map((a) => String(a?.accountName || "").trim())
+                                        .filter(Boolean);
+                                      setSelectedOrderAccounts(allNames);
+                                      if (allNames[0]) setNewBrand(allNames[0]);
+                                    }}
+                                    className="text-sky-700 font-semibold hover:underline cursor-pointer whitespace-nowrap"
+                                  >
+                                    Pilih semua ({sameCategoryAccounts.length})
+                                  </button>
+                                )}
+                              </div>
+                              {sameCategoryAccounts.length > 1 && (
+                                <div className="flex flex-row flex-wrap items-center gap-1.5">
+                                  {sameCategoryAccounts.map((acc) => {
+                                    const accName = String(acc?.accountName || "").trim();
+                                    const isChecked = currentSelected.some(
+                                      (s) => String(s).toLowerCase() === accName.toLowerCase()
+                                    );
+                                    return (
+                                      <button
+                                        key={acc.id || accName}
+                                        type="button"
+                                        onClick={() => toggleAccountSelection(accName)}
+                                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium border transition cursor-pointer whitespace-nowrap ${
+                                          isChecked
+                                            ? "bg-sky-600 text-white border-sky-600 shadow-2xs"
+                                            : "bg-white text-slate-700 border-slate-200 hover:border-sky-300 hover:bg-sky-50"
+                                        }`}
+                                      >
+                                        <span>{isChecked ? "✓" : "+"}</span>
+                                        <span>{accName}</span>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-1">Jumlah Konten / Batch (1 - 20)</label>
+                          <input
+                            type="number"
+                            min={1}
+                            max={20}
+                            value={batchCount}
+                            onChange={(e) => {
+                              const val = parseInt(e.target.value, 10);
+                              if (Number.isNaN(val)) {
+                                setBatchCount(1);
+                              } else {
+                                setBatchCount(Math.min(20, Math.max(1, val)));
+                              }
+                            }}
+                            className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm"
+                          />
+                          <p className="text-[11px] text-slate-500 mt-1">Maksimal 20 video dalam 1 kali kirim. Setiap video akan dibuatkan item order terpisah agar Video Editor bisa submit hasilnya per video.</p>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-1">Judul Konten</label>
+                          <input type="text" required value={newTitle} onChange={(e) => setNewTitle(e.target.value)} placeholder="Contoh: Hook 3 Detik Promo Spesial" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-1">Link Referensi (Opsional)</label>
+                          <input type="url" value={newReferenceUrl} onChange={(e) => setNewReferenceUrl(e.target.value)} placeholder="https://..." className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-1">Brief & Catatan Visual</label>
+                          <textarea required rows={3} value={newBrief} onChange={(e) => setNewBrief(e.target.value)} placeholder="Tulis hook, pacing, caption, atau referensi gaya edit..." className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-1">Link RAW Footage <span className="text-rose-600">*</span></label>
+                          <input type="url" required value={newRawFootageUrl} onChange={(e) => setNewRawFootageUrl(e.target.value)} placeholder="https://drive.google.com/..." className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+                        </div>
+          
+                        
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-700 mb-1">Deadline</label>
+                            <input type="date" value={newDeadline} onChange={(e) => setNewDeadline(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-700 mb-1">Prioritas</label>
+                            <select value={newPriority} onChange={(e) => setNewPriority(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white">
+                              <option value="Normal">Normal</option>
+                              <option value="Tinggi">Tinggi</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs font-semibold text-slate-700 mb-1">Video Editor</label>
+                            <select value={newAssignedEditor} onChange={(e) => setNewAssignedEditor(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white">
+                              <><option value="">Semua Editor</option>{Array.from(new Map((Array.isArray(editors) ? editors : []).filter((ed) => ed && (ed.name || ed.fullName || ed.email)).map((ed) => { const label = String(ed.name || ed.fullName || ed.email).trim(); return [label.toLowerCase(), { key: ed.id || ed.docId || label, value: label, label }]; })).values()).map((opt) => <option key={opt.key} value={opt.value}>{opt.label}</option>)}</>
+                            </select>
+                          </div>
+                        </div>
+          
+                        <div className="pt-2 flex justify-end gap-2">
+                          <button type="button" onClick={() => setIsNewOrderOpen(false)} className="px-4 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 cursor-pointer">Batal</button>
+                          <button type="submit" className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold cursor-pointer">Kirim Order (Otomatis Antrean + WA)</button>
+                        </div>
+                      </form>
+                    </div>
+                  </div>
+                )}
+          
+                {selectedOrder && (
+                  <div className="fixed inset-0 z-[60] bg-slate-900/40 flex items-center justify-center p-4 overflow-y-auto">
+                    <div className="bg-white rounded-2xl border border-sky-100 max-w-3xl w-full p-6 shadow-xl my-8" style={{ backgroundImage: "linear-gradient(145deg, rgba(255, 255, 255, 0.92) 0%, rgba(240, 249, 255, 0.35) 58%, rgba(254, 243, 199, 0.38) 100%)" }}>
+                      <div className="flex items-start justify-between gap-4 pb-4 border-b border-slate-100">
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-xs font-bold text-sky-700 bg-sky-50 px-2.5 py-1 rounded-lg">{selectedOrder.id}</span>
+                            {(() => {
+                              const rawAcc = String(selectedOrder.accountName || selectedOrder.brand || "").trim();
+                              const handleAcc = rawAcc ? (rawAcc.startsWith("@") ? rawAcc : `@${rawAcc}`) : "@akun";
+                              const contentKind = String(
+                                selectedOrder.contentType || selectedOrder.type || selectedOrder.contentCategory || ""
+                              ).trim();
+                              const suffixKind = contentKind ? `-${contentKind}` : "";
+                              return (
+                                <span className="text-xs font-semibold text-amber-800 bg-amber-50 px-2.5 py-1 rounded-lg border border-amber-200">
+                                  {handleAcc} · {String(selectedOrder.platform || "tiktok").toLowerCase()}(9:16){suffixKind}
+                                </span>
+                              );
+                            })()}
+                            {(() => {
+                              const st = STATUS_CONFIG[selectedOrder.status] || STATUS_CONFIG["Antrean"];
+                              return (
+                                <span className={"inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full border " + st.badgeClass}>
+                                  <span className={"w-1.5 h-1.5 rounded-full " + st.dotClass} />
+                                  Status: {st.label}
+                                </span>
+                              );
+                            })()}
+                          </div>
+                          <h3 className="text-lg font-bold text-slate-900 mt-2">{selectedOrder.title}</h3>
+                        </div>
+                        <button type="button" onClick={() => setSelectedOrderId(null)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"><X className="w-4 h-4" /></button>
+                      </div>
+          
+                      <div className="grid grid-cols-1 md:grid-cols-12 gap-6 pt-5">
+                        <div className="md:col-span-5">
+                          <VideoPreviewPlayer previewUrl={selectedOrder.previewUrl} title={selectedOrder.title} platform={selectedOrder.platform} />
+                        </div>
+          
+                        <div className="md:col-span-7 space-y-4">
+                          <div className="text-xs text-slate-600 space-y-1.5 bg-slate-50 p-3.5 rounded-xl border border-slate-200/70">
+                            <div><span className="font-semibold text-slate-800">Pemesan:</span> {selectedOrder.requestedBy} ({selectedOrder.requestedByRole})</div>
+                            <div><span className="font-semibold text-slate-800">Editor:</span> {selectedOrder.assignedEditor || "-"}</div>
+                            <div><span className="font-semibold text-slate-800">Deadline:</span> {selectedOrder.deadline || "-"}</div>
+                            <div><span className="font-semibold text-slate-800">Prioritas:</span> {selectedOrder.priority || "Normal"}</div>
+                            <div className="pt-1">
+                              <span className="font-semibold text-slate-800">Referensi:</span>{" "}
+                              {selectedOrder.referenceUrl ? (
+                                <a href={selectedOrder.referenceUrl} target="_blank" rel="noreferrer" className="text-sky-700 underline break-all">{selectedOrder.referenceUrl}</a>
+                              ) : (
+                                <span>-</span>
+                              )}
+                            </div>
+                            <div className="pt-1"><span className="font-semibold text-slate-800">Brief:</span> {selectedOrder.brief || "-"}</div>
+                            <div className="pt-1">
+                              <span className="font-semibold text-slate-800">Link RAW Footage:</span>{" "}
+                              {selectedOrder.rawFootageUrl ? (
+                                <a href={selectedOrder.rawFootageUrl} target="_blank" rel="noreferrer" className="text-sky-700 underline break-all">{selectedOrder.rawFootageUrl}</a>
+                              ) : (
+                                <span>-</span>
+                              )}
+                            </div>
+                            {selectedOrder.revisionNote && (
+                              <div className="mt-2 p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800">
+                                <span className="font-bold">Catatan Revisi:</span> {selectedOrder.revisionNote}
+                              </div>
+                            )}
+                          </div>
+          
+                          {/* PANEL AKSI BERDASARKAN ROLE */}
+                          {(currentUser?.role === "Video Editor" || Boolean(isEditor)) ? (
+                            <div className="p-4 rounded-2xl bg-sky-50/70 border border-sky-200/80 space-y-3">
+                              <div className="text-xs font-bold text-slate-800">Kontrol Pengerjaan Editor</div>
+          
+                              {(selectedOrder.status === "Antrean" || selectedOrder.status === "Revisi") && (
+                                <div className="space-y-2">
+                                  <p className="text-xs text-slate-600">
+                                    {selectedOrder.status === "Antrean"
+                                      ? "Order otomatis masuk antrean. Klik tombol di bawah saat kamu mulai mengerjakan."
+                                      : "Ada permintaan revisi. Klik tombol di bawah untuk mulai mengerjakan revisi."}
+                                  </p>
+                                  <button
+                                    type="button"
+                                    onClick={handleEditorStartWork}
+                                    className="w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-semibold text-xs transition cursor-pointer"
+                                  >
+                                    <Wrench className="w-4 h-4" />
+                                    Sedang Dikerjakan
+                                  </button>
+                                </div>
+                              )}
+          
+                              {selectedOrder.status === "Sedang Dikerjakan" && (
+                                <div className="space-y-3">
+                                  {!showEditorSubmitTab ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => setShowEditorSubmitTab(true)}
+                                      className="w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs transition cursor-pointer"
+                                    >
+                                      <CheckCircle2 className="w-4 h-4" />
+                                      Selesai
+                                    </button>
+                                  ) : (
+                                    <form onSubmit={handleEditorSubmitVideo} className="p-3.5 rounded-xl bg-white border border-sky-200 space-y-3">
+                                      <div className="text-xs font-bold text-sky-900">Kirim Link Hasil Edit Video (9:16)</div>
+                                      <div>
+                                        <label className="block text-[11px] font-semibold text-slate-600 mb-1">Link Video Hasil Edit (MP4)</label>
+                                        <input
+                                          type="url"
+                                          required
+                                          value={editorVideoUrl}
+                                          onChange={(e) => setEditorVideoUrl(e.target.value)}
+                                          placeholder="https://.../hasil-video-9x16.mp4"
+                                          className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs"
+                                        />
+                                      </div>
+                                      <div className="flex gap-2">
+                                        <button
+                                          type="button"
+                                          onClick={() => setShowEditorSubmitTab(false)}
+                                          className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 cursor-pointer"
+                                        >
+                                          Batal
+                                        </button>
+                                        <button
+                                          type="submit"
+                                          className="flex-1 inline-flex items-center justify-center gap-1.5 py-2 px-4 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-semibold text-xs transition cursor-pointer"
+                                        >
+                                          <Send className="w-3.5 h-3.5" />
+                                          Kirim (Status jadi Review + Notif WA)
+                                        </button>
+                                      </div>
+                                    </form>
+                                  )}
+                                </div>
+                              )}
+          
+                              {(selectedOrder.status === "Kurasi BM" || selectedOrder.status === "Review") && (
+                                <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 text-xs text-indigo-800 font-medium">
+                                  Video sudah dikirim dan berstatus <span className="font-bold">Kurasi BM</span>. Menunggu kurasi Brand Manager (Revisi / Siap Posting).
+                                </div>
+                              )}
+          
+                              {(selectedOrder.status === "Siap Posting" || selectedOrder.status === "Selesai") && !selectedOrder.isPosted && (
+                                <>
+                                  <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-medium">
+                                    Order ini telah lolos kurasi dan berstatus <span className="font-bold">Siap Posting</span> untuk dipublikasikan oleh SMM.
+                                  </div>
+                                  <OrderScheduleInfoCard
+                          order={selectedOrder}
+                          canEditSchedule={Boolean(isBrandManager || (typeof canCurateOrder === "function" && canCurateOrder(currentUser?.role)))}
+                          onSaveScheduleInline={async (ord, values) => {
+                            if (!ord || !ord.docId) return;
+                            const scheduledDate = String(values.scheduledDate || "").trim();
+                            const scheduledTime = String(values.scheduledTime || "").trim();
+                            const scheduledCaption = String(values.scheduledCaption || "").trim();
+                            const scheduledAt = scheduledDate
+                              ? new Date(`${scheduledDate}T${scheduledTime || "10:00"}:00`).toISOString()
+                              : "";
+                            const patchFields = {
+                              scheduledDate,
+                              scheduledTime,
+                              scheduledCaption,
+                              scheduledAt,
+                            };
+                            await updateDoc(doc(db, "orders", ord.docId), patchFields);
+                            if (typeof setOrders === "function") {
+                              setOrders((prev) =>
+                                (Array.isArray(prev) ? prev : []).map((item) => {
+                                  const match =
+                                    (ord.docId && item.docId === ord.docId) ||
+                                    (ord.id && item.id === ord.id);
+                                  return match ? { ...item, ...patchFields } : item;
+                                })
+                              );
+                            }
+                            if (typeof setSelectedOrder === "function") {
+                              setSelectedOrder((prev) =>
+                                prev && ((ord.docId && prev.docId === ord.docId) || (ord.id && prev.id === ord.id))
+                                  ? { ...prev, ...patchFields }
+                                  : prev
+                              );
+                            }
+                          }}
+                        />
+                                </>
+                              )}
+          
+                              {selectedOrder.status === "Sudah Diposting" && (
+                                <div className="p-3 rounded-xl bg-sky-50 border border-sky-200 text-xs text-sky-800 font-medium">
+                                  Konten telah dipublikasikan dan berstatus <span className="font-bold">Sudah Diposting</span>.
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            /* PANEL UNTUK BRAND MANAGER & Brand Manager */
+                            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
+                              {(isOrderReadyToPostStatus(selectedOrder) || isOrderPostedStatus(selectedOrder)) && (
+                      <OrderScheduleInfoCard
+                          order={selectedOrder}
+                          canEditSchedule={Boolean(isBrandManager || (typeof canCurateOrder === "function" && canCurateOrder(currentUser?.role)))}
+                        onSaveScheduleInline={async (ord, values) => {
+                          if (!ord || !ord.docId) return;
+                          const scheduledDate = String(values.scheduledDate || "").trim();
+                          const scheduledTime = String(values.scheduledTime || "").trim();
+                          const scheduledCaption = String(values.scheduledCaption || "").trim();
+                          const scheduledAt = scheduledDate
+                            ? new Date(`${scheduledDate}T${scheduledTime || "10:00"}:00`).toISOString()
+                            : "";
+                          const patchFields = {
+                            scheduledDate,
+                            scheduledTime,
+                            scheduledCaption,
+                            scheduledAt,
+                          };
+                          await updateDoc(doc(db, "orders", ord.docId), patchFields);
+                          if (typeof setOrders === "function") {
+                            setOrders((prev) =>
+                              (Array.isArray(prev) ? prev : []).map((item) => {
+                                const match =
+                                  (ord.docId && item.docId === ord.docId) ||
+                                  (ord.id && item.id === ord.id);
+                                return match ? { ...item, ...patchFields } : item;
+                              })
+                            );
+                          }
+                          if (typeof setSelectedOrder === "function") {
+                            setSelectedOrder((prev) =>
+                              prev && ((ord.docId && prev.docId === ord.docId) || (ord.id && prev.id === ord.id))
+                                ? { ...prev, ...patchFields }
+                                : prev
+                            );
+                          }
+                        }}
+                      />
+                    )}
+                    <div className="flex items-center justify-between">
+                                <span className="text-xs font-bold text-slate-800">Keputusan Review Order</span>
+                                <span className="text-[11px] font-semibold text-slate-500">
+                                  {selectedOrder.status === "Antrean" && "Keterangan: Masih dalam antrean editor"}
+                                  {selectedOrder.status === "Sedang Dikerjakan" && "Keterangan: Sedang dikerjakan oleh editor"}
+                                  {selectedOrder.status === "Revisi" && "Keterangan: Sedang direvisi oleh editor"}
+                                  {(selectedOrder.status === "Kurasi BM" || selectedOrder.status === "Review") && "Keterangan: Menunggu kurasi Brand Manager"}
+                                  {(selectedOrder.status === "Siap Posting" || selectedOrder.status === "Selesai") && !selectedOrder.isPosted && "Keterangan: Lolos kurasi, siap diposting SMM"}
+                                  {selectedOrder.status === "Sudah Diposting" && "Keterangan: Sudah dipublikasikan"}
+                                </span>
+                              </div>
+          
+                              <div className="grid grid-cols-2 gap-2.5">
+                                <button
+                                  type="button"
+                                  disabled={selectedOrder.status === "Selesai" && Boolean(selectedOrder.isPosted)}
+                                  onClick={() => {
+                                    if (typeof setShowEditorSubmitTab === "function") setShowEditorSubmitTab(false);
+                                    setShowRevisionInput((prev) => !prev);
+                                  }}
+                                  className="inline-flex items-center justify-center gap-1.5 py-2.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-semibold text-xs transition cursor-pointer"
+                                >
+                                  <RotateCcw className="w-3.5 h-3.5" />
+                                  Revisi
+                                </button>
+          
+                                <button
+                                  type="button"
+                                  disabled={!canCurateOrder(currentUser?.role) || (selectedOrder.status !== "Kurasi BM" && selectedOrder.status !== "Review")}
+                                  onClick={handleApproveComplete}
+                                  className="inline-flex items-center justify-center gap-1.5 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-semibold text-xs transition cursor-pointer"
+                                >
+                                  <CheckCircle2 className="w-3.5 h-3.5" />
+                                  Selesai
+                                </button>
+                              </div>
+          
+                              {canMarkPosted(currentUser?.role) && (selectedOrder.status === "Siap Posting" || selectedOrder.status === "Selesai") && !selectedOrder.isPosted && (
+                                <div className="pt-2">
+                                  <button
+                                    type="button"
+                                    disabled={postingOrderDocId === selectedOrder.docId}
+                                    onClick={() => handleMarkOrderAsPosted(selectedOrder)}
+                                    className="w-full inline-flex items-center justify-center gap-1.5 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-bold text-xs transition cursor-pointer"
+                                  >
+                                    <CheckCircle2 className="w-3.5 h-3.5" />
+                                    {postingOrderDocId === selectedOrder.docId ? "Menandai Terposting..." : "Posting"}
+                                  </button>
+                                </div>
+                              )}
+          
+                              {selectedOrder.status === "Selesai" && Boolean(selectedOrder.isPosted) && (
+                                <div className="pt-2">
+                                  <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-sky-50 text-sky-700 border border-sky-200 text-xs font-semibold">
+                                    Sudah Diposting
+                                  </span>
+                                </div>
+                              )}
+          
+                              {isBrandManager && (
+                                <div className="pt-4 border-t border-slate-200 flex items-center justify-end">
+                                  <button
+                                    type="button"
+                                    disabled={isDeletingOrder}
+                                    onClick={() => handleDeleteVideoOrder(selectedOrder)}
+                                    className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 text-white text-xs font-bold transition cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    {isDeletingOrder ? "Menghapus Orderan..." : "Hapus Orderan"}
+                                  </button>
+                                </div>
+                              )}
+          
+                              {selectedOrder.status !== "Kurasi BM" && selectedOrder.status !== "Review" && (
+                                <p className="text-[11px] text-slate-500">
+                                  Tombol <span className="font-semibold">Revisi</span> dan <span className="font-semibold">Siap Posting</span> hanya aktif saat status <span className="font-semibold text-indigo-700">Kurasi BM</span> untuk Brand Manager.
+                                </p>
+                              )}
+          
+                              {showRevisionInput && canCurateOrder(currentUser?.role) && (selectedOrder.status === "Kurasi BM" || selectedOrder.status === "Review") && (
+                                <form onSubmit={async (e) => {
+                                  if (e && typeof e.preventDefault === "function") e.preventDefault();
+                                  const currentOrderSnapshot = selectedOrder;
+                                  const cleanNote = String(revisionNote || "").trim() || currentOrderSnapshot?.brief || "-";
+                                  try {
+                                    if (typeof handleRequestRevision === "function") {
+                                      await handleRequestRevision(e);
+                                    }
+                                    if (currentOrderSnapshot?.docId && typeof updateDoc === "function" && typeof doc === "function" && typeof db !== "undefined" && db) {
+                                      await updateDoc(doc(db, "orders", currentOrderSnapshot.docId), {
+                                        status: "Revisi",
+                                        revisionNote: cleanNote,
+                                        updatedAt: typeof serverTimestamp === "function" ? serverTimestamp() : new Date().toISOString(),
+                                      });
+                                    }
+                                    if (typeof setShowRevisionInput === "function") setShowRevisionInput(false);
+                                    if (typeof setRevisionNote === "function") setRevisionNote("");
+                                  } catch (err) {
+                                    console.error("Gagal mengirim revisi order:", err);
+                                  }
+                                }} className="p-3 rounded-xl bg-white border border-rose-200 space-y-2.5">
+                                  <label className="block text-[11px] font-bold text-rose-800">Catatan Revisi untuk Editor (Opsional)</label>
+                                  <textarea
+                                    rows={2}
+                                    value={revisionNote}
+                                    onChange={(e) => setRevisionNote(e.target.value)}
+                                    placeholder="Tulis bagian yang perlu diperbaiki..."
+                                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs"
+                                  />
+                                  <div className="flex justify-end gap-2">
+                                    <button type="button" onClick={() => setShowRevisionInput(false)} className="px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-semibold text-slate-600 cursor-pointer">Batal</button>
+                                    <button type="submit" className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold cursor-pointer">Kirim Revisi + Notif WA Editor</button>
+                                  </div>
+                                </form>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+          
+                {isWaModalOpen && (
+                  <div className="fixed inset-0 z-[60] bg-slate-900/40 flex items-center justify-center p-4 overflow-y-auto">
+                    <div className="bg-white rounded-2xl border border-sky-100 max-w-2xl w-full p-6 shadow-xl my-8 space-y-5" style={{ backgroundImage: "linear-gradient(145deg, rgba(255, 255, 255, 0.92) 0%, rgba(240, 249, 255, 0.35) 58%, rgba(254, 243, 199, 0.38) 100%)" }}>
+                      <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                        <div className="flex items-center gap-2"><Bell className="w-5 h-5 text-amber-500" /><h3 className="font-bold text-base text-slate-900">Pengaturan & Log Notifikasi WhatsApp Otomatis</h3></div>
+                        <button type="button" onClick={() => setIsWaModalOpen(false)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"><X className="w-4 h-4" /></button>
+                      </div>
+                      <form onSubmit={handleSaveMyWhatsApp} className="flex flex-col sm:flex-row gap-2.5">
+                        <div className="flex-1">
+                          <label className="block text-xs font-semibold text-slate-700 mb-1">Nomor WA Terdaftar Akun Kamu ({currentUser.name})</label>
+                          <input type="tel" value={editWaNumber} onChange={(e) => setEditWaNumber(e.target.value)} placeholder="6281234567890" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+                        </div>
+                        <button type="submit" className="sm:self-end px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold cursor-pointer">Ganti Nomor WA</button>
+                      </form>
+                      <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-xs font-bold text-slate-700">Riwayat Notifikasi WA (Tersimpan di Firestore)</div>
+                          <button type="button" onClick={handleMarkAllWaAsRead} className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold cursor-pointer">Tandai Semua Dibaca</button>
+                        </div>
+                        {(Array.isArray(waLogs) ? waLogs.length : 0) === 0 ? (
+                          <p className="text-xs text-slate-400">Belum ada log notifikasi WA.</p>
+                        ) : waLogs.map((log) => {
+                          const isRead = (Array.isArray(readWaLogIds) && readWaLogIds.includes(log.id));
+                          return (
+                            <div key={log.id} className={`p-3 rounded-xl border border-slate-200/80 text-xs space-y-1 ${isRead ? "bg-slate-100/70 opacity-65" : "bg-slate-50"}`}>
+                              <div className="flex items-center justify-between font-semibold text-slate-800">
+                                <span>{log.event} → {log.targetName} (+{log.phone})</span>
+                                <span className="text-[11px] text-slate-400">{log.time}</span>
+                              </div>
+                              <p className="text-slate-600">{log.message}</p>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {activeTiktokAccount && (() => {
+                  const linkedOrders = (Array.isArray(orders) ? orders : []).filter(
+                    (ord) => isOrderOwnedByCurrentAccount(ord) && isOrderMatchedToTiktokAccount(ord, activeTiktokAccount)
+                  );
+                  const checkPosted = (ord) => {
+                    if (typeof isOrderPostedStatus === "function") return isOrderPostedStatus(ord);
+                    const st = String(ord?.status || "").trim().toLowerCase();
+                    return Boolean(ord?.isPosted) || Boolean(ord?.postedAt) || st === "sudah diposting";
+                  };
+                  const checkReadyToPost = (ord) => {
+                    if (typeof isOrderReadyToPostStatus === "function") return isOrderReadyToPostStatus(ord);
+                    const st = String(ord?.status || "").trim().toLowerCase();
+                    return !checkPosted(ord) && (st === "siap posting" || st === "selesai");
+                  };
+                  const readyToPostList = linkedOrders.filter((ord) => checkReadyToPost(ord));
+                  const postedList = linkedOrders.filter((ord) => checkPosted(ord));
+                  const inProgressList = linkedOrders.filter(
+                    (ord) => !checkReadyToPost(ord) && !checkPosted(ord)
+                  );
+          
+                  const q = (accountSearchQuery || "").trim().toLowerCase();
+                  const filteredOrders = linkedOrders.filter((ord) => {
+                    const matchesQuery =
+                      !q ||
+                      String(ord.id || "").toLowerCase().includes(q) ||
+                      String(ord.title || "").toLowerCase().includes(q) ||
+                      String(ord.brand || "").toLowerCase().includes(q);
+                    const matchesStatus =
+                      accountStatusFilter === "Semua" || ord.status === accountStatusFilter;
+                    const matchesPlatform =
+                      accountPlatformFilter === "Semua" || ord.platform === accountPlatformFilter;
+                    return matchesQuery && matchesStatus && matchesPlatform;
+                  });
+          
+                  const removedSet = new Set((Array.isArray(removedTtTypes) ? removedTtTypes : []).map((x) => String(x || "").trim().toLowerCase()));
+                  const allAvailableTypes = Array.from(
+                    new Map(
+                      sanitizeContentTypes([
+                        ...TIKTOK_CONTENT_TYPES,
+                        ...(Array.isArray(editTtSelectedTypes) ? editTtSelectedTypes : []),
+                      ])
+                        .filter((t) => !removedSet.has(String(t || "").trim().toLowerCase()))
+                        .map((t) => [String(t || "").trim().toLowerCase(), String(t || "").trim()])
+                    ).values()
+                  ).filter(Boolean);
+          
+                  return (
+                    <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
+                      <div className="bg-white rounded-2xl border border-slate-200 max-w-5xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+                        {/* Header */}
+                        <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-4 bg-slate-50/70">
+                          <div className="flex items-center gap-3 min-w-0">
+                            {(() => {
+                              const logoSrc = String(
+                                activeTiktokAccount?.logoUrl ||
+                                  activeTiktokAccount?.avatarUrl ||
+                                  activeTiktokAccount?.photoURL ||
+                                  activeTiktokAccount?.logo ||
+                                  ""
+                              ).trim();
+                              const brandLabel = String(
+                                activeTiktokAccount?.brandName || activeTiktokAccount?.accountName || "CF"
+                              ).trim();
+                              const brandLower = brandLabel.toLowerCase();
+          
+                              if (logoSrc) {
+                                return (
+                                  <img
+                                    src={logoSrc}
+                                    alt={brandLabel}
+                                    className="w-10 h-10 rounded-xl object-cover border border-slate-200 bg-white shrink-0"
+                                  />
+                                );
+                              }
+          
+                              let badgeStyle = "bg-slate-900 text-white";
+                              if (brandLower.includes("primagold") || brandLower.includes("kambing")) {
+                                badgeStyle = "bg-[#6F0092] text-[#fff6f6]";
+                              } else if (brandLower.includes("herbapil") || brandLower.includes("madu")) {
+                                badgeStyle = "bg-[#164c19] text-[#fff6f6]";
+                              } else if (brandLower.includes("youzhi") || brandLower.includes("ziozi") || brandLower.includes("salep")) {
+                                badgeStyle = "bg-[#700909] text-[#FFC561]";
+                              }
+          
+                              const initials = brandLabel
+                                .split(/\s+/)
+                                .filter(Boolean)
+                                .slice(0, 2)
+                                .map((w) => w[0]?.toUpperCase() || "")
+                                .join("") || "♪";
+          
+                              return (
+                                <div
+                                  className={`w-10 h-10 rounded-xl ${badgeStyle} flex items-center justify-center font-bold text-xs tracking-wide shadow-xs shrink-0`}
+                                  title={brandLabel}
+                                >
+                                  {initials}
+                                </div>
+                              );
+                            })()}
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <h3 className="font-bold text-base text-slate-900 truncate">
+                                  {activeTiktokAccount.accountName || activeTiktokAccount.brandName}
+                                </h3>
+                                <span className="px-2 py-0.5 rounded-full bg-slate-200/80 text-slate-700 text-[11px] font-semibold">
+                                  {activeTiktokAccount.brandName}
+                                </span>
+                              </div>
+                              <p className="text-xs text-slate-500">
+                                Monitoring konten akun & manajemen akun TikTok
+                              </p>
+                            </div>
+                          </div>
+          
+                          
+                          <div className="relative z-20 flex items-center gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => setActiveTiktokAccountId(null)}
+                            className="p-2 rounded-xl hover:bg-slate-200/70 text-slate-600 cursor-pointer shrink-0"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                          </div>
+                        </div>
+          
+                        {/* Tab & Aksi Hapus (Khusus Brand Manager) */}
+                        <div className="px-6 pt-3 border-b border-slate-200 flex items-center justify-between gap-3 flex-wrap bg-white">
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setTiktokDrawerTab("monitoring")}
+                              className={
+                                "px-3.5 py-2 text-xs font-semibold border-b-2 transition cursor-pointer " +
+                                (tiktokDrawerTab === "monitoring"
+                                  ? "border-sky-600 text-sky-700"
+                                  : "border-transparent text-slate-500 hover:text-slate-800")
+                              }
+                            >
+                              Daftar Konten Akun ({linkedOrders.length})
+                            </button>
+                            {isBrandManager && (
+                              <button
+                                type="button"
+                                onClick={() => setTiktokDrawerTab("edit")}
+                                className={
+                                  "px-3.5 py-2 text-xs font-semibold border-b-2 transition cursor-pointer " +
+                                  (tiktokDrawerTab === "edit"
+                                    ? "border-sky-600 text-sky-700"
+                                    : "border-transparent text-slate-500 hover:text-slate-800")
+                                }
+                              >
+                                Edit Akun & Jenis Konten
+                              </button>
+                            )}
+                          </div>
+          
+                          {isBrandManager && (
+                            <button
+                              type="button"
+                              disabled={isDeletingTtAccount}
+                              onClick={handleDeleteTiktokAccount}
+                              className="mb-2 px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-semibold transition cursor-pointer disabled:opacity-50"
+                            >
+                              {isDeletingTtAccount ? "Menghapus..." : "Hapus Akun"}
+                            </button>
+                          )}
+                        </div>
+          
+                        {/* Body */}
+                        <div className="p-6 overflow-y-auto space-y-5 flex-1 bg-slate-50/40">
+                          {tiktokDrawerTab === "monitoring" || !isBrandManager ? (
+                            <>
+                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                <div className="rounded-xl border border-slate-200 bg-white p-3.5">
+                                  <div className="text-[11px] font-semibold text-slate-600 uppercase">
+                                    Dalam Produksi
+                                  </div>
+                                  <div className="text-2xl font-bold text-slate-900 mt-0.5">
+                                    {inProgressList.length}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500">
+                                    Antrean / Proses / Review / Revisi
+                                  </div>
+                                </div>
+          
+                                <div className="rounded-xl border border-emerald-200 bg-white p-3.5">
+                                  <div className="text-[11px] font-semibold text-emerald-700 uppercase">
+                                    Siap Posting
+                                  </div>
+                                  <div className="text-2xl font-bold text-slate-900 mt-0.5">
+                                    {readyToPostList.length}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500">
+                                    Status "Selesai" & belum diposting
+                                  </div>
+                                </div>
+          
+                                <div className="rounded-xl border border-sky-200 bg-white p-3.5">
+                                  <div className="text-[11px] font-semibold text-sky-700 uppercase">
+                                    Sudah Diposting
+                                  </div>
+                                  <div className="text-2xl font-bold text-slate-900 mt-0.5">
+                                    {postedList.length}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500">
+                                    Sudah ditandai terposting di Detail Order
+                                  </div>
+                                </div>
+                              </div>
+          
+                              {/* Baris Cari ID Order, Judul Konten, atau Brand + Filter Status & Platform */}
+                              <div className="bg-white rounded-2xl border border-slate-200 p-4 flex flex-col md:flex-row items-stretch md:items-center gap-3">
+                                <input
+                                  type="text"
+                                  value={accountSearchQuery}
+                                  onChange={(e) => setAccountSearchQuery(e.target.value)}
+                                  placeholder="Cari ID order, judul konten, atau brand..."
+                                  className="flex-1 px-3.5 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-sky-500"
+                                />
+                                <select
+                                  value={accountStatusFilter}
+                                  onChange={(e) => setAccountStatusFilter(e.target.value)}
+                                  className="px-3.5 py-2 rounded-xl border border-slate-300 text-sm bg-white text-slate-700 focus:outline-none focus:border-sky-500"
+                                >
+                                  <option value="Semua">Semua Status</option>
+                                  {Object.keys(STATUS_CONFIG || {}).map((st) => (
+                                    <option key={st} value={st}>
+                                      {st}
+                                    </option>
+                                  ))}
+                                </select>
+                                <select
+                                  value={accountPlatformFilter}
+                                  onChange={(e) => setAccountPlatformFilter(e.target.value)}
+                                  className="px-3.5 py-2 rounded-xl border border-slate-300 text-sm bg-white text-slate-700 focus:outline-none focus:border-sky-500"
+                                >
+                                  <option value="Semua">Semua Platform</option>
+                                  {(PLATFORMS || ["TikTok", "Instagram Reels", "YouTube Shorts"]).map((pf) => (
+                                    <option key={pf} value={pf}>
+                                      {pf}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+          
+                              {/* Grid Kotak-Kotak (Card Grid) Daftar Konten Akun */}
+                              {filteredOrders.length === 0 ? (
+                                <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center text-xs text-slate-500">
+                                  Belum ada konten order yang sesuai dengan filter pada akun ini.
+                                </div>
+                              ) : (
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                  {filteredOrders.map((ord) => {
+                                    const stCfg = STATUS_CONFIG[ord.status] || {
+                                      label: ord.status || "Antrean",
+                                      badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
+                                      dotClass: "bg-slate-500",
+                                    };
+                                    const isReady = ord.status === "Selesai" && !ord.isPosted;
+                                    const isPosted = ord.status === "Selesai" && Boolean(ord.isPosted);
+          
+                                    return (
+                                      <div
+                                        key={ord.docId || ord.id}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          if (typeof setActiveTiktokAccountId === "function") setActiveTiktokAccountId(null);
+                                          if (typeof setSelectedOrderId === "function") setSelectedOrderId(ord.docId || ord.id);
+                                        }}
+                                        className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-sky-400 transition flex flex-col justify-between gap-4 cursor-pointer"
+                                      >
+                                        <div className="space-y-2.5">
+                                          <div className="flex items-center justify-between gap-2">
+                                            <span className="px-2.5 py-1 rounded-lg bg-sky-50 text-sky-700 text-[11px] font-bold truncate">
+                                              {ord.id} • {ord.brand || activeTiktokAccount.brandName}
+                                            </span>
+                                            <span
+                                              className={
+                                                "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border text-[11px] font-semibold shrink-0 " +
+                                                (isPosted
+                                                  ? "bg-sky-50 text-sky-700 border-sky-200"
+                                                  : isReady
+                                                    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                                    : stCfg.badgeClass)
+                                              }
+                                            >
+                                              <span
+                                                className={
+                                                  "w-1.5 h-1.5 rounded-full " +
+                                                  (isPosted
+                                                    ? "bg-sky-500"
+                                                    : isReady
+                                                      ? "bg-emerald-500"
+                                                      : stCfg.dotClass || "bg-slate-500")
+                                                }
+                                              />
+                                              {isPosted ? "Sudah Diposting" : isReady ? "Siap Posting" : stCfg.label}
+                                            </span>
+                                          </div>
+          
+                                          <div>
+                                            <h4 className="font-bold text-sm text-slate-900 line-clamp-1">
+                                              {ord.title}
+                                            </h4>
+                                            <p className="text-xs text-slate-500 line-clamp-2 mt-0.5">
+                                              {ord.brief || ord.contentType || "-"}
+                                            </p>
+                                          </div>
+                                        </div>
+          
+                                        <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2 text-xs">
+                                          <div className="flex items-center gap-2 min-w-0">
+                                            <span className="px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200/80 text-[11px] font-semibold truncate">
+                                              {(() => {
+                                                const plat = ord.platform || "TikTok";
+                                                const ratio = ord.aspectRatio || "9:16";
+                                                const kind = String(
+                                                  ord.contentType || ord.type || ord.contentCategory || ""
+                                                ).trim();
+                                                return `${plat} (${ratio})${kind ? `-${kind}` : ""}`;
+                                              })()}
+                                            </span>
+                                            <span className="text-[11px] text-slate-500 truncate">
+                                              {ord.deadline || "-"}
+                                            </span>
+                                          </div>
+          
+                                          <span className="inline-flex items-center gap-0.5 text-xs font-bold text-sky-700 shrink-0">
+                                            <span>Detail</span>
+                                            <ChevronRight className="w-3.5 h-3.5" />
+                                          </span>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </>
+                          ) : !canEditTiktokCard(currentUser?.role) ? (
+                            <div className="bg-white rounded-2xl border border-slate-200 p-5 text-xs text-slate-600">
+                              Pengubahan data akun TikTok hanya tersedia untuk Brand Manager.
+                            </div>
+                          ) : (
+                            /* Tab Edit Akun & Jenis Konten (Khusus Brand Manager) */
+                            <form
+                              onSubmit={handleUpdateTiktokAccountDetail}
+                              className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4"
+                            >
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                <div>
+                                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                                    Nama Brand
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={editTtBrandName}
+                                    onChange={(e) => setEditTtBrandName(e.target.value)}
+                                    placeholder="Contoh: PrimaGold"
+                                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-sky-500"
+                                    required
+                                  />
+                                </div>
+          
+                                <div>
+                                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                                    Handle / Akun TikTok
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={editTtAccountName}
+                                    onChange={(e) => setEditTtAccountName(e.target.value)}
+                                    placeholder="@primagold_official"
+                                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-sky-500"
+                                    required
+                                  />
+                                </div>
+                              </div>
+          
+                              {/* LOGO_EDIT_SECTION */}
+                              <div className="space-y-2">
+                                <label className="block text-xs font-semibold text-slate-700">Logo Brand</label>
+                                <div className="flex flex-wrap items-center gap-3">
+                                  <div className="w-12 h-12 rounded-xl border border-slate-200 bg-slate-50 flex items-center justify-center overflow-hidden shrink-0">
+                                    {editTtBrandLogo ? (
+                                      <img src={editTtBrandLogo} alt="Logo Brand" className="w-full h-full object-cover" />
+                                    ) : (
+                                      <span className="text-[11px] font-bold text-slate-400">LOGO</span>
+                                    )}
+                                  </div>
+                                  <label className="px-3 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 cursor-pointer">
+                                    Pilih / Ganti Logo
+                                    <input
+                                      type="file"
+                                      accept="image/*"
+                                      onChange={(e) => handleTtLogoFileChange(e, "edit")}
+                                      className="hidden"
+                                    />
+                                  </label>
+                                  {editTtBrandLogo && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditTtBrandLogo("")}
+                                      className="px-3 py-2 rounded-xl text-xs font-semibold text-rose-600 hover:bg-rose-50 cursor-pointer"
+                                    >
+                                      Hapus Logo
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="space-y-2">
+                                <label className="block text-xs font-semibold text-slate-700">
+                                  Jenis Konten Akun (Tambah / Hapus Tag)
+                                </label>
+                                <div className="flex flex-wrap gap-2">
+                                  {allAvailableTypes.map((typeName) => {
+                                    const active = (Array.isArray(editTtSelectedTypes) ? editTtSelectedTypes : []).includes(
+                                      typeName
+                                    );
+                                    const isCustomTag =
+                                      !(Array.isArray(TIKTOK_CONTENT_TYPES) ? TIKTOK_CONTENT_TYPES : []).some(
+                                        (base) => String(base || "").trim().toLowerCase() === String(typeName || "").trim().toLowerCase()
+                                      );
+                                    const handleRemoveTag = (e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      const targetKey = String(typeName || "").trim().toLowerCase();
+                                      setRemovedTtTypes((prev) => {
+                                        const next = Array.from(
+                                          new Set([...(Array.isArray(prev) ? prev : []), String(typeName || "").trim()])
+                                        );
+                                        try {
+                                          localStorage.setItem("cf_removed_tiktok_content_types", JSON.stringify(next));
+                                        } catch {}
+                                        return next;
+                                      });
+                                      setEditTtSelectedTypes((prev) =>
+                                        (Array.isArray(prev) ? prev : []).filter(
+                                          (item) => String(item || "").trim().toLowerCase() !== targetKey
+                                        )
+                                      );
+                                      if (isCustomTag && typeof setBrandManagerContentTypes === "function") {
+                                        setBrandManagerContentTypes((prev) =>
+                                          (Array.isArray(prev) ? prev : []).filter(
+                                            (item) => String(item || "").trim().toLowerCase() !== targetKey
+                                          )
+                                        );
+                                      }
+                                    };
+                                    return (
+                                      <div
+                                        key={typeName}
+                                        className={
+                                          "inline-flex items-center rounded-xl text-xs font-semibold border transition overflow-hidden " +
+                                          (active
+                                            ? "bg-emerald-600 text-white border-emerald-600"
+                                            : "bg-white text-slate-600 border-slate-300 hover:bg-slate-50")
+                                        }
+                                      >
+                                        <button
+                                          type="button"
+                                          onClick={() => toggleEditTtContentType(typeName)}
+                                          className="px-3 py-1.5 cursor-pointer flex items-center gap-1"
+                                        >
+                                          <span>{active ? "✓" : "+"}</span>
+                                          <span>{typeName}</span>
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={handleRemoveTag}
+                                          title={"Hapus tag " + typeName}
+                                          aria-label={"Hapus tag " + typeName}
+                                          className={
+                                            "pr-2 pl-1 py-1.5 cursor-pointer transition leading-none " +
+                                            (active
+                                              ? "text-emerald-100 hover:text-white hover:bg-emerald-700/60"
+                                              : "text-slate-400 hover:text-rose-600 hover:bg-rose-50")
+                                          }
+                                        >
+                                          ×
+                                        </button>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+          
+                                <div className="flex items-center gap-2 pt-2">
+                                  <input
+                                    type="text"
+                                    value={editTtCustomType}
+                                    onChange={(e) => setEditTtCustomType(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") {
+                                        e.preventDefault();
+                                        handleAddEditTtCustomType();
+                                      }
+                                    }}
+                                    placeholder="Tambah jenis konten kustom baru..."
+                                    className="flex-1 px-3.5 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-sky-500"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={handleAddEditTtCustomType}
+                                    className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold cursor-pointer"
+                                  >
+                                    Tambah Tag
+                                  </button>
+                                </div>
+                              </div>
+          
+                              <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setTiktokDrawerTab("monitoring")}
+                                  className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50 cursor-pointer"
+                                >
+                                  Batal
+                                </button>
+                                <button
+                                  type="submit"
+                                  disabled={isSavingTtEdit}
+                                  className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold transition cursor-pointer disabled:opacity-50"
+                                >
+                                  {isSavingTtEdit ? "Menyimpan..." : "Simpan Perubahan Akun"}
+                                </button>
+                              </div>
+                            </form>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+          
+                {isAddTiktokModalOpen && canCreateTiktokAccount(currentUser?.role) && (
+                  <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl border border-slate-200 max-w-md w-full p-6 shadow-xl space-y-4">
+                      <div className="flex items-center justify-between">
+                        <h3 className="font-bold text-base text-slate-900">Tambah Akun TikTok</h3>
+                        <button
+                          type="button"
+                          onClick={() => setIsAddTiktokModalOpen(false)}
                           className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"
                         >
                           <X className="w-4 h-4" />
                         </button>
                       </div>
-
-                      <div className="overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-xl">
-                        {activePopupGroup.orders.length === 0 ? (
-                          <div className="p-6 text-center text-sm text-slate-500">
-                            Tidak ada order berstatus Antrean atau Revisi untuk jenis konten ini.
+                      {/* LOGO_ADD_SECTION */}
+                      <div className="space-y-1.5">
+                        <label className="block text-xs font-semibold text-slate-700">Logo Brand (Opsional)</label>
+                        <div className="flex items-center gap-3">
+                          <div className="w-11 h-11 rounded-xl border border-slate-200 bg-slate-50 flex items-center justify-center overflow-hidden shrink-0">
+                            {ttBrandLogo ? (
+                              <img src={ttBrandLogo} alt="Preview Logo Brand" className="w-full h-full object-cover" />
+                            ) : (
+                              <span className="text-[10px] font-bold text-slate-400">LOGO</span>
+                            )}
                           </div>
-                        ) : (
-                          activePopupGroup.orders.map((ord) => {
-                            const stLabel = String(ord?.status || "Antrean").trim();
-                            const isRev = stLabel === "Revisi";
-                            return (
-                              <div
-                                key={ord.docId || ord.id}
-                                onClick={() => {
-                                  if (typeof setShowEditorSubmitTab === "function") {
-                                    setShowEditorSubmitTab(false);
-                                  }
-                                  if (typeof setShowRevisionInput === "function") {
-                                    setShowRevisionInput(false);
-                                  }
-                                  if (typeof setSelectedOrderId === "function") {
-                                    setSelectedOrderId(ord.docId || ord.id);
-                                  }
-                                  setEditorContentPopupType(null);
-                                }}
-                                className="p-3.5 hover:bg-slate-50 transition flex items-center justify-between gap-3 cursor-pointer"
-                              >
-                                <div className="min-w-0 space-y-1">
-                                  <div className="flex items-center gap-2 flex-wrap">
-                                    <span className="font-semibold text-sm text-slate-900 truncate">
-                                      {ord.title || ord.judul || ord.id || "Order Video"}
-                                    </span>
-                                    <span
-                                      className={
-                                        "px-2 py-0.5 rounded-md text-[11px] font-semibold " +
-                                        (isRev
-                                          ? "bg-rose-50 text-rose-700 border border-rose-200"
-                                          : "bg-sky-50 text-sky-700 border border-sky-200")
-                                      }
-                                    >
-                                      {stLabel}
-                                    </span>
-                                  </div>
-                                  <div className="text-xs text-slate-500 truncate">
-                                    {ord.accountName || ord.tiktokAccountName || ord.brand || "-"} •{" "}
-                                    {ord.platform || "TikTok"}
-                                    {ord.deadline ? ` • Deadline: ${ord.deadline}` : ""}
-                                  </div>
-                                </div>
-                                <span className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold shrink-0">
-                                  Kerjakan
-                                </span>
-                              </div>
-                            );
-                          })
-                        )}
+                          <label className="px-3 py-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 cursor-pointer">
+                            Upload Logo
+                            <input
+                              type="file"
+                              accept="image/*"
+                              onChange={(e) => handleTtLogoFileChange(e, "add")}
+                              className="hidden"
+                            />
+                          </label>
+                          {ttBrandLogo && (
+                            <button
+                              type="button"
+                              onClick={() => setTtBrandLogo("")}
+                              className="text-xs font-semibold text-rose-600 hover:underline cursor-pointer"
+                            >
+                              Hapus
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <form onSubmit={handleSaveTiktokAccount} className="space-y-3.5">
+                                      <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-1">Nama Brand <span className="text-rose-600">*</span></label>
+                          <input
+                            type="text"
+                            required
+                            value={ttBrandName}
+                            onChange={(e) => setTtBrandName(e.target.value)}
+                            placeholder="Contoh: PrimaGold"
+                            className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-1">Nama Akun TikTok <span className="text-rose-600">*</span></label>
+                          <input
+                            type="text"
+                            required
+                            value={ttAccountName}
+                            onChange={(e) => setTtAccountName(e.target.value)}
+                            placeholder="Contoh: @primagold.id"
+                            className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                            Pilihan Jenis Konten (Bisa pilih lebih dari 1) <span className="text-rose-600">*</span>
+                          </label>
+                          <div className="space-y-1.5 max-h-52 overflow-y-auto p-2.5 rounded-xl border border-slate-200 bg-slate-50/70">
+                            {sanitizeContentTypes([...(Array.isArray(tiktokAccounts) ? tiktokAccounts.flatMap((acc) => acc?.contentTypes || []) : []), ...(Array.isArray(brandManagerContentTypes) ? brandManagerContentTypes : []), ...(Array.isArray(TIKTOK_CONTENT_TYPES) ? TIKTOK_CONTENT_TYPES : [])]).map((ct) => {
+                              const checked = ttSelectedTypes.includes(ct);
+                              return (
+                                <label key={ct} className="flex items-center gap-2 text-xs text-slate-800 cursor-pointer py-0.5">
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={() => toggleTtContentType(ct)}
+                                    className="rounded border-slate-300"
+                                  />
+                                  <span>{ct}</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                          {(Array.isArray(ttSelectedTypes) ? ttSelectedTypes.length : 0) === 0 && (
+                            <p className="text-[11px] text-rose-600 mt-1">Pilih minimal 1 jenis konten.</p>
+                          )}
+                        </div>
+                        <div className="pt-2 flex justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setIsAddTiktokModalOpen(false)}
+                            className="px-4 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 cursor-pointer"
+                          >
+                            Batal
+                          </button>
+                          <button
+                            type="submit"
+                            disabled={(Array.isArray(ttSelectedTypes) ? ttSelectedTypes.length : 0) === 0}
+                            className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white text-xs font-semibold cursor-pointer"
+                          >
+                            Simpan Akun TikTok
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+                  </div>
+                )}
+              </div>
+                <ScheduleFormModal
+                  isOpen={scheduleModalState.isOpen}
+                  mode={scheduleModalState.mode}
+                  order={scheduleModalState.targetOrder}
+                  isSaving={scheduleModalState.isSaving}
+                  onClose={() =>
+                    setScheduleModalState({ isOpen: false, mode: "create", targetOrder: null, isSaving: false })
+                  }
+                  onSubmitSchedule={async (values) => {
+                    if (scheduleModalState.mode === "edit") {
+                      await handleSaveScheduleUpdate(values);
+                      return;
+                    }
+                    const targetOrd = scheduleModalState.targetOrder || selectedOrder;
+                    if (!targetOrd) return;
+                    setScheduleModalState((prev) => ({ ...prev, isSaving: true }));
+                    try {
+                      await applyReadyToPostWithSchedule(targetOrd, values);
+                      setScheduleModalState({ isOpen: false, mode: "create", targetOrder: null, isSaving: false });
+                    } catch (err) {
+                      console.error("Gagal menetapkan Siap Posting dengan jadwal:", err);
+                      alert(err?.message || "Gagal menyimpan jadwal Siap Posting.");
+                      setScheduleModalState((prev) => ({ ...prev, isSaving: false }));
+                    }
+                  }}
+                />
+          
+                {pendingDeleteOrder && (
+                  <div className="fixed inset-0 z-[70] bg-slate-900/60 backdrop-blur-[1px] flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl border border-rose-200 shadow-2xl max-w-md w-full p-6 space-y-4">
+                      <div className="space-y-1.5">
+                        <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-50 text-rose-700 border border-rose-200 text-xs font-bold">
+                          Peringatan Penghapusan Orderan
+                        </div>
+                        <h3 className="text-lg font-bold text-slate-900">
+                          Hapus Orderan Video?
+                        </h3>
+                        <p className="text-sm text-slate-600 leading-relaxed">
+                          Orderan video{" "}
+                          <span className="font-bold text-slate-900">
+                            {pendingDeleteOrder.id ? `${pendingDeleteOrder.id} - ` : ""}
+                            {pendingDeleteOrder.title || "tanpa judul"}
+                          </span>{" "}
+                          akan dihapus secara permanen dan tidak dapat dikembalikan. Apakah Anda yakin ingin melanjutkan?
+                        </p>
+                      </div>
+          
+                      <div className="flex items-center justify-end gap-2 pt-2">
+                        <button
+                          type="button"
+                          disabled={isDeletingOrder}
+                          onClick={() => setPendingDeleteOrder(null)}
+                          className="px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold transition cursor-pointer"
+                        >
+                          Batal
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isDeletingOrder}
+                          onClick={confirmDeleteVideoOrder}
+                          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 text-white text-xs font-bold transition cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          {isDeletingOrder ? "Menghapus..." : "Ya, Hapus Orderan"}
+                        </button>
                       </div>
                     </div>
                   </div>
                 )}
               </>
-            );
-          })()}
-
-          {/* Grid Daftar Order Video Utama */}
-          {(() => {
-            const parseOrderMs = (item) => {
-              const raw = item?.createdAt ?? item?.timestamp ?? item?.updatedAt ?? item?.postedAt ?? null;
-              if (!raw) return null;
-              if (typeof raw === "number") return raw;
-              if (typeof raw?.toMillis === "function") return raw.toMillis();
-              if (typeof raw?.seconds === "number") return raw.seconds * 1000;
-              const dt = Date.parse(raw);
-              return Number.isNaN(dt) ? null : dt;
-            };
-
-            const baseSource = (Array.isArray(orders) ? orders : []).filter((ord) => {
-              if (!ord) return false;
-              const rText = String(
-                (typeof currentUser !== "undefined" && currentUser?.role) ||
-                  (typeof activeRole !== "undefined" ? activeRole : "") ||
-                  ""
-              )
-                .trim()
-                .toLowerCase();
-              const isBmAccount =
-                rText.includes("brand manager") ||
-                rText.includes("brand management") ||
-                rText === "manager" ||
-                rText === "admin" ||
-                rText === "owner";
-              if (!isBmAccount) {
-                if (rText.includes("editor") && typeof currentUser !== "undefined" && currentUser) {
-                  return isOrderVisibleToCurrentEditor(ord, currentUser);
-                }
-                return true;
-              }
-
-              const myUid = String(currentUser?.uid || currentUser?.id || "").trim();
-              const myEmail = String(currentUser?.email || "").trim().toLowerCase();
-              const myName = String(currentUser?.name || "").trim().toLowerCase();
-              const orderUid = String(ord?.requestedByUid || "").trim();
-              const orderEmail = String(ord?.requestedByEmail || "").trim().toLowerCase();
-              const orderReqBy = String(ord?.requestedBy || "").trim().toLowerCase();
-
-              if (orderUid) return Boolean(myUid && orderUid === myUid);
-              if (orderEmail) return Boolean(myEmail && orderEmail === myEmail);
-              if (orderReqBy) return Boolean((myName && orderReqBy === myName) || (myEmail && orderReqBy === myEmail));
-              return false;
-            });
-            const compareOldestFirst = (a, b) => {
-              const msA = parseOrderMs(a.order);
-              const msB = parseOrderMs(b.order);
-              if (msA !== null && msB !== null && msA !== msB) return msA - msB;
-              if (msA !== null && msB === null) return -1;
-              if (msA === null && msB !== null) return 1;
-              return a.index - b.index;
-            };
-
-            const isPostedOrder = (ord) => {
-              const stLow = String(ord?.status || "").trim().toLowerCase();
-              return (
-                Boolean(ord?.isPosted) ||
-                Boolean(ord?.postedAt) ||
-                stLow === "sudah diposting" ||
-                stLow === "sudah diupload" ||
-                stLow === "sudah di-upload" ||
-                stLow === "terposting"
-              );
-            };
-
-            const activeRoleText = String(
-              (typeof currentUser !== "undefined" && currentUser?.role) ||
-                (typeof activeRole !== "undefined" ? activeRole : "") ||
-                ""
-            )
-              .trim()
-              .toLowerCase();
-            const isVideoEditorRole = activeRoleText.includes("editor");
-            const isProductionRole =
-              activeRoleText.includes("production") || activeRoleText.includes("produksi");
-            const isSmmRole =
-              activeRoleText.includes("sosial media") ||
-              activeRoleText.includes("social media") ||
-              activeRoleText === "smm" ||
-              activeRoleText === "sosmed";
-
-            const isReadyToPostOrPostedForProduction = (ord) => {
-              if (!ord) return false;
-              if (isPostedOrder(ord)) return true;
-              const stLow = String(ord?.status || "").trim().toLowerCase();
-              return stLow === "selesai" || stLow === "siap posting";
-            };
-
-            const displayedBrandOrders = (() => {
-              const isHistoryActive = typeof showContentHistory !== "undefined" && showContentHistory;
-
-              if (isProductionRole) {
-                return baseSource
-                  .map((order, index) => ({ order, index }))
-                  .filter(({ order }) => {
-                    if (!order) return false;
-                    const doneOrPosted = isReadyToPostOrPostedForProduction(order);
-                    return isHistoryActive ? doneOrPosted : !doneOrPosted;
-                  })
-                  .sort(compareOldestFirst)
-                  .map(({ order }) => order);
-              }
-
-              if (isVideoEditorRole) {
-                const isEditorActiveStatus = (ord) => {
-                  const st = String(ord?.status || "").trim();
-                  return st === "Antrean" || st === "Sedang Dikerjakan" || st === "Revisi";
-                };
-
-                const matchesSelectedContentType = (ord) => {
-                  if (
-                    typeof selectedEditorContentType === "undefined" ||
-                    !selectedEditorContentType ||
-                    String(selectedEditorContentType).trim().toLowerCase() === "semua"
-                  ) {
-                    return true;
-                  }
-                  const target = String(selectedEditorContentType).trim().toLowerCase();
-                  const candidateValues = [];
-                  if (Array.isArray(ord?.contentTypes)) candidateValues.push(...ord.contentTypes);
-                  for (const key of [
-                    "contentType",
-                    "jenisKonten",
-                    "tipeKonten",
-                    "category",
-                    "contentCategory",
-                  ]) {
-                    if (ord && ord[key]) candidateValues.push(ord[key]);
-                  }
-                  return candidateValues.some(
-                    (val) => String(val || "").trim().toLowerCase() === target
-                  );
-                };
-
-                if (isHistoryActive) {
-                  return baseSource
-                    .map((order, index) => ({ order, index }))
-                    .filter(({ order }) => {
-                      if (!order) return false;
-                      if (isEditorActiveStatus(order)) return false;
-                      return matchesSelectedContentType(order);
-                    })
-                    .sort(compareOldestFirst)
-                    .map(({ order }) => order);
-                }
-
-                const queueList = baseSource
-                  .map((order, index) => ({ order, index }))
-                  .filter(
-                    ({ order }) =>
-                      order &&
-                      !isPostedOrder(order) &&
-                      String(order.status || "").trim() === "Antrean" &&
-                      matchesSelectedContentType(order)
-                  )
-                  .sort(compareOldestFirst)
-                  .map(({ order }) => order);
-
-                const workingList = baseSource
-                  .map((order, index) => ({ order, index }))
-                  .filter(
-                    ({ order }) =>
-                      order &&
-                      !isPostedOrder(order) &&
-                      String(order.status || "").trim() === "Sedang Dikerjakan" &&
-                      matchesSelectedContentType(order)
-                  )
-                  .sort(compareOldestFirst)
-                  .map(({ order }) => order);
-
-                const revisionList = baseSource
-                  .map((order, index) => ({ order, index }))
-                  .filter(
-                    ({ order }) =>
-                      order &&
-                      !isPostedOrder(order) &&
-                      String(order.status || "").trim() === "Revisi" &&
-                      matchesSelectedContentType(order)
-                  )
-                  .sort(compareOldestFirst)
-                  .map(({ order }) => order);
-
-                return [...queueList, ...workingList, ...revisionList];
-              }
-
-              if (isSmmRole) {
-                const isReviewStageForSmm = (ord) => {
-                  const stLow = String(ord?.status || "").trim().toLowerCase();
-                  return (
-                    stLow === "review" ||
-                    stLow === "kurasi bm" ||
-                    stLow === "perlu review" ||
-                    stLow.includes("review")
-                  );
-                };
-
-                const isSmmReadyToPost = (ord) => {
-                  if (!ord || isPostedOrder(ord) || isReviewStageForSmm(ord)) return false;
-                  const stLow = String(ord?.status || "").trim().toLowerCase();
-                  return stLow === "siap posting" || stLow === "selesai";
-                };
-
-                if (isHistoryActive) {
-                  return baseSource
-                    .map((order, index) => ({ order, index }))
-                    .filter(({ order }) => order && isPostedOrder(order))
-                    .sort(compareOldestFirst)
-                    .map(({ order }) => order);
-                }
-
-                return baseSource
-                  .map((order, index) => ({ order, index }))
-                  .filter(({ order }) => isSmmReadyToPost(order))
-                  .sort(compareOldestFirst)
-                  .map(({ order }) => order);
-              }
-
-              const isNeedsBmReviewOrder = (ord) => {
-                if (!ord || isPostedOrder(ord)) return false;
-                const st = String(ord?.status || "").trim();
-                return st === "Review" || st === "Kurasi BM";
-              };
-
-              if (isHistoryActive) {
-                return baseSource
-                  .map((order, index) => ({ order, index }))
-                  .filter(({ order }) => order && !isNeedsBmReviewOrder(order))
-                  .sort(compareOldestFirst)
-                  .map(({ order }) => order);
-              }
-
-              return baseSource
-                .map((order, index) => ({ order, index }))
-                .filter(({ order }) => isNeedsBmReviewOrder(order))
-                .sort(compareOldestFirst)
-                .map(({ order }) => order);
-            })();
-
-            return (
-          <>
-<section className="bg-white rounded-2xl border border-slate-200/80 shadow-sm p-4 sm:p-5 space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-              <div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <h2 className="text-sm sm:text-base font-bold text-slate-900">
-                    Produktivitas Tim
-                  </h2>
-                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-sky-50 text-sky-700 border border-sky-200/70">
-                    {productivityData.isAdminOrOwner ? "Seluruh Tim" : "Akun Anda"}
-                  </span>
-                </div>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  {productivityData.isAdminOrOwner
-                    ? "Pantau output, proses revisi, dan tingkat penyelesaian per Brand Manager & Video Editor."
-                    : "Ringkasan output dan progres order konten video"}
-                </p>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setShowProductivityPanel((prev) => !prev)}
-                className={
-                  "px-3.5 py-1.5 rounded-xl text-xs font-semibold border transition cursor-pointer shrink-0 self-start sm:self-auto " +
-                  (showProductivityPanel
-                    ? "bg-sky-600 text-white border-sky-600"
-                    : "bg-slate-50 text-slate-700 border-slate-200 hover:border-sky-300 hover:text-sky-700")
-                }
-              >
-                {showProductivityPanel ? "Tutup Rekap" : "Lihat Produktivitas"}
-              </button>
-            </div>
-
-            {showProductivityPanel && (
-              <div className="space-y-4 pt-1 border-t border-slate-100">
-                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2.5 pt-2">
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    {[
-                      { id: "today", label: "Hari Ini" },
-                      { id: "7d", label: "7 Hari" },
-                      { id: "30d", label: "30 Hari" },
-                      { id: "all", label: "Semua" },
-                    ].map((p) => (
-                      <button
-                        key={p.id}
-                        type="button"
-                        onClick={() => setProductivityRange(p.id)}
-                        className={
-                          "px-2.5 py-1 rounded-lg text-xs font-semibold border transition cursor-pointer " +
-                          (productivityRange === p.id
-                            ? "bg-slate-900 text-white border-slate-900"
-                            : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50")
-                        }
-                      >
-                        {p.label}
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="flex items-center gap-2 flex-wrap">
-                    {productivityData.isAdminOrOwner && (
-                      <select
-                        value={productivityRoleFilter}
-                        onChange={(e) => setProductivityRoleFilter(e.target.value)}
-                        className="px-2.5 py-1.5 rounded-xl border border-slate-200 text-xs font-medium text-slate-700 bg-white"
-                      >
-                        <option value="Semua">Semua Role</option>
-                        <option value="Video Editor">Video Editor</option>
-                        <option value="Brand Management">Brand Management</option>
-                        <option value="Publisher">Publisher</option>
-                      </select>
-                    )}
-                    <input
-                      type="text"
-                      value={productivitySearch}
-                      onChange={(e) => setProductivitySearch(e.target.value)}
-                      placeholder="Cari nama user..."
-                      className="px-3 py-1.5 rounded-xl border border-slate-200 text-xs text-slate-700 bg-white w-full sm:w-44"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                  <div className="rounded-xl bg-slate-50 border border-slate-200/70 p-3">
-                    <div className="text-[11px] font-medium text-slate-500">Total Order</div>
-                    <div className="text-lg font-bold text-slate-900 mt-0.5">{productivityData.summary.total}</div>
-                  </div>
-                  <div className="rounded-xl bg-emerald-50/70 border border-emerald-200/70 p-3">
-                    <div className="text-[11px] font-medium text-emerald-700">Selesai</div>
-                    <div className="text-lg font-bold text-emerald-800 mt-0.5">{productivityData.summary.completed}</div>
-                  </div>
-                  <div className="rounded-xl bg-indigo-50/70 border border-indigo-200/70 p-3">
-                    <div className="text-[11px] font-medium text-indigo-700">Menunggu Review</div>
-                    <div className="text-lg font-bold text-indigo-800 mt-0.5">{productivityData.summary.review}</div>
-                  </div>
-                  <div className="rounded-xl bg-amber-50/70 border border-amber-200/70 p-3">
-                    <div className="text-[11px] font-medium text-amber-800">Rasio Selesai</div>
-                    <div className="text-lg font-bold text-amber-900 mt-0.5">{productivityData.completionRate}%</div>
-                  </div>
-                </div>
-
-                {productivityData.rows.length === 0 ? (
-                  <div className="rounded-xl border border-dashed border-slate-200 p-5 text-center text-xs text-slate-500">
-                    Belum ada data produktivitas pada periode atau filter yang dipilih.
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {productivityData.rows.map((row) => (
-                      <div
-                        key={`${row.role}-${row.key}`}
-                        className="rounded-2xl border border-slate-200/80 bg-slate-50/50 p-3.5 space-y-2.5"
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <div className="text-sm font-bold text-slate-900 truncate">{row.name}</div>
-                            <span className="inline-block mt-0.5 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-white border border-slate-200 text-slate-600">
-                              {row.role}
-                            </span>
-                          </div>
-                          <div className="text-right shrink-0">
-                            <div className="text-xs font-bold text-emerald-700">{row.completionRate}% Selesai</div>
-                            <div className="text-[11px] text-slate-500">{row.completed}/{row.total} order</div>
-                          </div>
-                        </div>
-
-                        <div className="w-full h-2 rounded-full bg-slate-200/80 overflow-hidden">
-                          <div
-                            className="h-full rounded-full bg-emerald-500 transition-all"
-                            style={{ width: `${Math.min(100, Math.max(0, row.completionRate))}%` }}
-                          />
-                        </div>
-
-                        <div className="flex items-center justify-between gap-2 text-[11px] text-slate-600 pt-0.5 flex-wrap">
-                          <span>Antrean/Proses: <b>{row.queue + row.inProgress}</b></span>
-                          <span>Review: <b>{row.review}</b></span>
-                          <span>Revisi: <b className="text-rose-600">{row.revision}</b></span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </section>
-
-          <section className="space-y-3">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-baseline gap-2.5 min-w-0">
-                <h2 className="text-base font-bold text-slate-900 truncate">
-                  {showContentHistory ? "Riwayat Konten" : "Daftar Order Video"}
-                </h2>
-                <span className="text-xs font-medium text-slate-500 shrink-0">
-                  {(displayedBrandOrders?.length ?? 0)} order
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowContentHistory((prev) => !prev)}
-                className={
-                  "px-3.5 py-1.5 rounded-xl text-xs font-semibold border transition cursor-pointer shrink-0 " +
-                  (showContentHistory
-                    ? "bg-slate-900 text-white border-slate-900"
-                    : "bg-white text-slate-700 border-slate-200 hover:border-sky-300 hover:text-sky-700")
-                }
-              >
-                Riwayat Konten
-              </button>
-            </div>
-
-            {(displayedBrandOrders?.length ?? 0) === 0 ? (
-              <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-8 text-center space-y-1.5">
-                <p className="text-sm font-semibold text-slate-700">Belum ada order video yang tampil</p>
-                <p className="text-xs text-slate-500">
-                  Klik tombol "+ Buat Order Video" untuk membuat order baru atau ubah filter pencarian.
-                </p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {displayedBrandOrders.map((ord) => {
-                  const stLowCard = String(ord?.status || "").trim().toLowerCase();
-                  const isPostedCard =
-                    Boolean(ord?.isPosted) ||
-                    Boolean(ord?.postedAt) ||
-                    stLowCard === "sudah diposting" ||
-                    stLowCard === "sudah diupload" ||
-                    stLowCard === "sudah di-upload" ||
-                    stLowCard === "terposting";
-                  const isReadyToPostCard =
-                    !isPostedCard &&
-                    stLowCard !== "review" &&
-                    stLowCard !== "kurasi bm" &&
-                    !stLowCard.includes("review") &&
-                    (stLowCard === "siap posting" || stLowCard === "selesai");
-                  const baseStCfg = STATUS_CONFIG[ord.status] || {
-                    label: ord.status || "Antrean",
-                    badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
-                    dotClass: "bg-slate-500",
-                  };
-                  const stCfg = isSmmRole
-                    ? isPostedCard
-                      ? {
-                          label: "Terposting",
-                          badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
-                          dotClass: "bg-slate-500",
-                        }
-                      : isReadyToPostCard
-                      ? {
-                          label: "Siap Posting",
-                          badgeClass: "bg-emerald-50 text-emerald-700 border-emerald-200",
-                          dotClass: "bg-emerald-500",
-                        }
-                      : baseStCfg
-                    : isReadyToPostCard
-                    ? {
-                        label: "Siap Posting",
-                        badgeClass: "bg-emerald-50 text-emerald-700 border-emerald-200",
-                        dotClass: "bg-emerald-500",
-                      }
-                    : isPostedCard
-                    ? {
-                        label: "Terposting",
-                        badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
-                        dotClass: "bg-slate-500",
-                      }
-                    : baseStCfg;
-                  const cardBorderClass = isSmmRole
-                    ? isPostedCard
-                      ? "bg-white rounded-2xl border border-slate-200 p-5 shadow-xs hover:border-slate-300 transition flex flex-col justify-between gap-3 cursor-pointer"
-                      : "bg-white rounded-2xl border border-emerald-200/80 p-5 shadow-xs hover:border-emerald-400 transition flex flex-col justify-between gap-3 cursor-pointer"
-                    : "bg-white rounded-2xl border border-slate-200 p-5 shadow-xs hover:border-sky-300 transition flex flex-col justify-between gap-3 cursor-pointer";
-                  return (
-                    <div
-                      key={ord.docId || ord.id}
-                      onClick={() => {
-                        if (typeof setShowEditorSubmitTab === "function") setShowEditorSubmitTab(false);
-                        if (typeof setShowRevisionInput === "function") setShowRevisionInput(false);
-                        if (typeof setSelectedOrderId === "function") setSelectedOrderId(ord.docId || ord.id);
-                      }}
-                      className={cardBorderClass}
-                    >
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className={
-                            isSmmRole
-                              ? isPostedCard
-                                ? "text-[11px] font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-md"
-                                : "text-[11px] font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-md"
-                              : "text-[11px] font-bold text-sky-700 bg-sky-50 px-2 py-0.5 rounded-md"
-                          }>
-                            {ord.id || "ORDER"}
-                          </span>
-                          <span className={"inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-0.5 rounded-full border " + stCfg.badgeClass}>
-                            <span className={"w-1.5 h-1.5 rounded-full " + stCfg.dotClass} />
-                            {stCfg.label}
-                          </span>
-                        </div>
-                        <h3 className="text-sm font-bold text-slate-900 line-clamp-2">{ord.title || "Untitled Order"}</h3>
-                        <p className="text-xs text-slate-500 truncate">{ord.brand || "-"} • {ord.platform || "TikTok"}</p>
-                      </div>
-                      <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
-                        <span>{ord.contentType || ord.type || "Konten"}</span>
-                        <span className={isSmmRole && !isPostedCard ? "font-semibold text-emerald-700" : "font-semibold text-sky-700"}>
-                          {isSmmRole && !isPostedCard ? "Posting →" : "Detail →"}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-          </>);
-          })()}
-      </main>
-
-      {isNewOrderOpen && (
-        <div className="fixed inset-0 z-40 bg-slate-900/40 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl border border-sky-100 max-w-lg w-full p-6 shadow-xl space-y-4" style={{ backgroundImage: "linear-gradient(145deg, rgba(255, 255, 255, 0.92) 0%, rgba(240, 249, 255, 0.35) 58%, rgba(254, 243, 199, 0.38) 100%)" }}>
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-base text-slate-900">Buat Order Video Vertikal (9:16)</h3>
-              <button type="button" onClick={() => setIsNewOrderOpen(false)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"><X className="w-4 h-4" /></button>
-            </div>
-            <form onSubmit={(e) => { if (typeof handleCreateOrder === "function") return handleCreateOrder(e); e.preventDefault(); }} className="space-y-3.5">
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div className="relative">
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Akun Tiktok</label>
-                  <div className="relative">
-                    <div className="relative flex items-center">
-                      <input
-                        type="text"
-                        required
-                        value={newBrand}
-                        onClick={() => setIsTiktokDropdownOpen(true)}
-                        onFocus={() => setIsTiktokDropdownOpen(true)}
-                        onBlur={() => setTimeout(() => setIsTiktokDropdownOpen(false), 160)}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          setNewBrand(val);
-                          setIsTiktokDropdownOpen(true);
-                          const found = (Array.isArray(tiktokAccounts) ? tiktokAccounts : []).find(
-                            (acc) =>
-                              String(acc?.accountName || "").toLowerCase() === val.trim().toLowerCase() ||
-                              String(acc?.brandName || "").toLowerCase() === val.trim().toLowerCase()
-                          );
-                          if (found) {
-                            const cleanTypes = sanitizeContentTypes(found.contentTypes);
-                            if ((cleanTypes?.length ?? 0) > 0) {
-                              setNewContentType(cleanTypes[0]);
-                            }
-                          }
-                        }}
-                        placeholder="Pilih atau ketik @akun / brand..."
-                        autoComplete="off"
-                        className="w-full px-3 py-2 pr-14 rounded-xl border border-slate-200 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/15 transition text-sm bg-white"
-                      />
-                      {newBrand && (
-                        <button
-                          type="button"
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                            setNewBrand("");
-                            setNewContentType("");
-                            setIsTiktokDropdownOpen(true);
-                          }}
-                          title="Reset & tampilkan semua akun"
-                          className="absolute right-2 px-1.5 py-0.5 text-[11px] font-semibold text-slate-500 hover:text-slate-800 rounded bg-slate-100 hover:bg-slate-200 transition cursor-pointer"
-                        >
-                          Reset
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                  {isTiktokDropdownOpen && (
-                    <div className="absolute left-0 right-0 mt-1.5 z-30 max-h-56 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-lg py-1 transition-all duration-150">
-                      {(Array.isArray(tiktokAccounts) ? tiktokAccounts : [])
-                        .filter((acc) => {
-                          const q = (newBrand || "").trim().toLowerCase();
-                          if (!q) return true;
-                          const bName = String(acc?.brandName || "").toLowerCase();
-                          const aName = String(acc?.accountName || "").toLowerCase();
-                          const isExactSelected = bName === q || aName === q;
-                          if (isExactSelected) return true;
-                          return bName.includes(q) || aName.includes(q);
-                        })
-                        .map((acc) => {
-                          const cleanTypes = sanitizeContentTypes(acc.contentTypes);
-                          return (
-                            <button
-                              key={acc.id}
-                              type="button"
-                              onMouseDown={(e) => {
-                                e.preventDefault();
-                                setNewBrand(acc.accountName);
-                                setNewContentType(Array.isArray(cleanTypes) && cleanTypes.length > 0 ? cleanTypes[0] : "");
-                                setIsTiktokDropdownOpen(false);
-                              }}
-                              className="w-full text-left px-3.5 py-2 hover:bg-sky-50/80 transition flex flex-col cursor-pointer border-b border-slate-50 last:border-b-0"
-                            >
-                              <span className="text-xs font-bold text-slate-900 leading-tight">
-                                {acc.brandName}
-                              </span>
-                              <span className="text-[11px] font-medium text-sky-700 leading-tight mt-0.5">
-                                {acc.accountName}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      {(tiktokAccounts?.length ?? 0) === 0 && (
-                        <div className="px-3.5 py-2.5 text-xs text-slate-500">
-                          Belum ada akun TikTok. Klik "+ Tambah Akun TikTok".
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Platform</label>
-                  <select value="TikTok" onChange={() => setNewPlatform("TikTok")} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-slate-50 text-slate-800">
-                    <option value="TikTok">TikTok</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Jenis konten</label>
-                  <select
-                    value={orderModalContentTypes.includes(newContentType) ? newContentType : ""}
-                    onChange={(e) => setNewContentType(e.target.value)}
-                    disabled={orderModalContentTypes.length === 0}
-                    className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/15 transition text-sm bg-white text-slate-800 disabled:bg-slate-50 disabled:text-slate-400"
-                  >
-                    <option value="">{orderModalContentTypes.length === 0 ? "Pilih akun TikTok dulu" : "Pilih jenis konten"}</option>
-                    {orderModalContentTypes.map((ct, idx) => (
-                      <option key={String(ct) + "_" + idx} value={ct}>
-                        {ct}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Jumlah Konten / Batch (1 - 20)</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={20}
-                  value={batchCount}
-                  onChange={(e) => {
-                    const val = parseInt(e.target.value, 10);
-                    if (Number.isNaN(val)) {
-                      setBatchCount(1);
-                    } else {
-                      setBatchCount(Math.min(20, Math.max(1, val)));
-                    }
-                  }}
-                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm"
-                />
-                <p className="text-[11px] text-slate-500 mt-1">Maksimal 20 video dalam 1 kali kirim. Setiap video akan dibuatkan item order terpisah agar Video Editor bisa submit hasilnya per video.</p>
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Judul Konten</label>
-                <input type="text" required value={newTitle} onChange={(e) => setNewTitle(e.target.value)} placeholder="Contoh: Hook 3 Detik Promo Spesial" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Link Referensi (Opsional)</label>
-                <input type="url" value={newReferenceUrl} onChange={(e) => setNewReferenceUrl(e.target.value)} placeholder="https://..." className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Brief & Catatan Visual</label>
-                <textarea required rows={3} value={newBrief} onChange={(e) => setNewBrief(e.target.value)} placeholder="Tulis hook, pacing, caption, atau referensi gaya edit..." className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Link RAW Footage <span className="text-rose-600">*</span></label>
-                <input type="url" required value={newRawFootageUrl} onChange={(e) => setNewRawFootageUrl(e.target.value)} placeholder="https://drive.google.com/..." className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
-              </div>
-
-              
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Deadline</label>
-                  <input type="date" value={newDeadline} onChange={(e) => setNewDeadline(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Prioritas</label>
-                  <select value={newPriority} onChange={(e) => setNewPriority(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white">
-                    <option value="Normal">Normal</option>
-                    <option value="Tinggi">Tinggi</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Video Editor</label>
-                  <select value={newAssignedEditor} onChange={(e) => setNewAssignedEditor(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white">
-                    <><option value="">Semua Editor</option>{Array.from(new Map((Array.isArray(editors) ? editors : []).filter((ed) => ed && (ed.name || ed.fullName || ed.email)).map((ed) => { const label = String(ed.name || ed.fullName || ed.email).trim(); return [label.toLowerCase(), { key: ed.id || ed.docId || label, value: label, label }]; })).values()).map((opt) => <option key={opt.key} value={opt.value}>{opt.label}</option>)}</>
-                  </select>
-                </div>
-              </div>
-
-              <div className="pt-2 flex justify-end gap-2">
-                <button type="button" onClick={() => setIsNewOrderOpen(false)} className="px-4 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 cursor-pointer">Batal</button>
-                <button type="submit" className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold cursor-pointer">Kirim Order (Otomatis Antrean + WA)</button>
-              </div>
-            </form>
-          </div>
         </div>
-      )}
-
-      {selectedOrder && (
-        <div className="fixed inset-0 z-40 bg-slate-900/40 flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl border border-sky-100 max-w-3xl w-full p-6 shadow-xl my-8" style={{ backgroundImage: "linear-gradient(145deg, rgba(255, 255, 255, 0.92) 0%, rgba(240, 249, 255, 0.35) 58%, rgba(254, 243, 199, 0.38) 100%)" }}>
-            <div className="flex items-start justify-between gap-4 pb-4 border-b border-slate-100">
-              <div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-bold text-sky-700 bg-sky-50 px-2.5 py-1 rounded-lg">{selectedOrder.id}</span>
-                  <span className="text-xs font-semibold text-amber-800 bg-amber-50 px-2.5 py-1 rounded-lg border border-amber-200">{selectedOrder.brand} • {selectedOrder.platform} (9:16)</span>
-                  {(() => {
-                    const st = STATUS_CONFIG[selectedOrder.status] || STATUS_CONFIG["Antrean"];
-                    return (
-                      <span className={"inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full border " + st.badgeClass}>
-                        <span className={"w-1.5 h-1.5 rounded-full " + st.dotClass} />
-                        Status: {st.label}
-                      </span>
-                    );
-                  })()}
-                </div>
-                <h3 className="text-lg font-bold text-slate-900 mt-2">{selectedOrder.title}</h3>
-              </div>
-              <button type="button" onClick={() => setSelectedOrderId(null)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"><X className="w-4 h-4" /></button>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-6 pt-5">
-              <div className="md:col-span-5">
-                <VideoPreviewPlayer previewUrl={selectedOrder.previewUrl} title={selectedOrder.title} platform={selectedOrder.platform} />
-              </div>
-
-              <div className="md:col-span-7 space-y-4">
-                <div className="text-xs text-slate-600 space-y-1.5 bg-slate-50 p-3.5 rounded-xl border border-slate-200/70">
-                  <div><span className="font-semibold text-slate-800">Pemesan:</span> {selectedOrder.requestedBy} ({selectedOrder.requestedByRole})</div>
-                  <div><span className="font-semibold text-slate-800">Editor:</span> {selectedOrder.assignedEditor || "-"}</div>
-                  <div><span className="font-semibold text-slate-800">Deadline:</span> {selectedOrder.deadline || "-"}</div>
-                  <div><span className="font-semibold text-slate-800">Prioritas:</span> {selectedOrder.priority || "Normal"}</div>
-                  <div className="pt-1">
-                    <span className="font-semibold text-slate-800">Referensi:</span>{" "}
-                    {selectedOrder.referenceUrl ? (
-                      <a href={selectedOrder.referenceUrl} target="_blank" rel="noreferrer" className="text-sky-700 underline break-all">{selectedOrder.referenceUrl}</a>
-                    ) : (
-                      <span>-</span>
-                    )}
-                  </div>
-                  <div className="pt-1"><span className="font-semibold text-slate-800">Brief:</span> {selectedOrder.brief || "-"}</div>
-                  <div className="pt-1">
-                    <span className="font-semibold text-slate-800">Link RAW Footage:</span>{" "}
-                    {selectedOrder.rawFootageUrl ? (
-                      <a href={selectedOrder.rawFootageUrl} target="_blank" rel="noreferrer" className="text-sky-700 underline break-all">{selectedOrder.rawFootageUrl}</a>
-                    ) : (
-                      <span>-</span>
-                    )}
-                  </div>
-                  {selectedOrder.revisionNote && (
-                    <div className="mt-2 p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800">
-                      <span className="font-bold">Catatan Revisi:</span> {selectedOrder.revisionNote}
-                    </div>
-                  )}
-                </div>
-
-                {/* PANEL AKSI BERDASARKAN ROLE */}
-                {(currentUser?.role === "Video Editor" || Boolean(isEditor)) ? (
-                  <div className="p-4 rounded-2xl bg-sky-50/70 border border-sky-200/80 space-y-3">
-                    <div className="text-xs font-bold text-slate-800">Kontrol Pengerjaan Editor</div>
-
-                    {(selectedOrder.status === "Antrean" || selectedOrder.status === "Revisi") && (
-                      <div className="space-y-2">
-                        <p className="text-xs text-slate-600">
-                          {selectedOrder.status === "Antrean"
-                            ? "Order otomatis masuk antrean. Klik tombol di bawah saat kamu mulai mengerjakan."
-                            : "Ada permintaan revisi. Klik tombol di bawah untuk mulai mengerjakan revisi."}
-                        </p>
-                        <button
-                          type="button"
-                          onClick={handleEditorStartWork}
-                          className="w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-semibold text-xs transition cursor-pointer"
-                        >
-                          <Wrench className="w-4 h-4" />
-                          Sedang Dikerjakan
-                        </button>
-                      </div>
-                    )}
-
-                    {selectedOrder.status === "Sedang Dikerjakan" && (
-                      <div className="space-y-3">
-                        {!showEditorSubmitTab ? (
-                          <button
-                            type="button"
-                            onClick={() => setShowEditorSubmitTab(true)}
-                            className="w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs transition cursor-pointer"
-                          >
-                            <CheckCircle2 className="w-4 h-4" />
-                            Selesai
-                          </button>
-                        ) : (
-                          <form onSubmit={handleEditorSubmitVideo} className="p-3.5 rounded-xl bg-white border border-sky-200 space-y-3">
-                            <div className="text-xs font-bold text-sky-900">Kirim Link Hasil Edit Video (9:16)</div>
-                            <div>
-                              <label className="block text-[11px] font-semibold text-slate-600 mb-1">Link Video Hasil Edit (MP4)</label>
-                              <input
-                                type="url"
-                                required
-                                value={editorVideoUrl}
-                                onChange={(e) => setEditorVideoUrl(e.target.value)}
-                                placeholder="https://.../hasil-video-9x16.mp4"
-                                className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs"
-                              />
-                            </div>
-                            <div className="flex gap-2">
-                              <button
-                                type="button"
-                                onClick={() => setShowEditorSubmitTab(false)}
-                                className="px-3 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 cursor-pointer"
-                              >
-                                Batal
-                              </button>
-                              <button
-                                type="submit"
-                                className="flex-1 inline-flex items-center justify-center gap-1.5 py-2 px-4 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-semibold text-xs transition cursor-pointer"
-                              >
-                                <Send className="w-3.5 h-3.5" />
-                                Kirim (Status jadi Review + Notif WA)
-                              </button>
-                            </div>
-                          </form>
-                        )}
-                      </div>
-                    )}
-
-                    {(selectedOrder.status === "Kurasi BM" || selectedOrder.status === "Review") && (
-                      <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 text-xs text-indigo-800 font-medium">
-                        Video sudah dikirim dan berstatus <span className="font-bold">Kurasi BM</span>. Menunggu kurasi Brand Manager (Revisi / Siap Posting).
-                      </div>
-                    )}
-
-                    {(selectedOrder.status === "Siap Posting" || selectedOrder.status === "Selesai") && !selectedOrder.isPosted && (
-                      <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-medium">
-                        Order ini telah lolos kurasi dan berstatus <span className="font-bold">Siap Posting</span> untuk dipublikasikan oleh SMM.
-                      </div>
-                    )}
-
-                    {selectedOrder.status === "Sudah Diposting" && (
-                      <div className="p-3 rounded-xl bg-sky-50 border border-sky-200 text-xs text-sky-800 font-medium">
-                        Konten telah dipublikasikan dan berstatus <span className="font-bold">Sudah Diposting</span>.
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  /* PANEL UNTUK BRAND MANAGER & Brand Manager */
-                  <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-slate-800">Keputusan Review Order</span>
-                      <span className="text-[11px] font-semibold text-slate-500">
-                        {selectedOrder.status === "Antrean" && "Keterangan: Masih dalam antrean editor"}
-                        {selectedOrder.status === "Sedang Dikerjakan" && "Keterangan: Sedang dikerjakan oleh editor"}
-                        {selectedOrder.status === "Revisi" && "Keterangan: Sedang direvisi oleh editor"}
-                        {(selectedOrder.status === "Kurasi BM" || selectedOrder.status === "Review") && "Keterangan: Menunggu kurasi Brand Manager"}
-                        {(selectedOrder.status === "Siap Posting" || selectedOrder.status === "Selesai") && !selectedOrder.isPosted && "Keterangan: Lolos kurasi, siap diposting SMM"}
-                        {selectedOrder.status === "Sudah Diposting" && "Keterangan: Sudah dipublikasikan"}
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2.5">
-                      <button
-                        type="button"
-                        disabled={selectedOrder.status === "Selesai" && Boolean(selectedOrder.isPosted)}
-                        onClick={() => {
-                          if (typeof setShowEditorSubmitTab === "function") setShowEditorSubmitTab(false);
-                          setShowRevisionInput((prev) => !prev);
-                        }}
-                        className="inline-flex items-center justify-center gap-1.5 py-2.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-semibold text-xs transition cursor-pointer"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5" />
-                        Revisi
-                      </button>
-
-                      <button
-                        type="button"
-                        disabled={!canCurateOrder(currentUser?.role) || (selectedOrder.status !== "Kurasi BM" && selectedOrder.status !== "Review")}
-                        onClick={handleApproveComplete}
-                        className="inline-flex items-center justify-center gap-1.5 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-semibold text-xs transition cursor-pointer"
-                      >
-                        <CheckCircle2 className="w-3.5 h-3.5" />
-                        Selesai
-                      </button>
-                    </div>
-
-                    {canMarkPosted(currentUser?.role) && (selectedOrder.status === "Siap Posting" || selectedOrder.status === "Selesai") && !selectedOrder.isPosted && (
-                      <div className="pt-2">
-                        <button
-                          type="button"
-                          disabled={postingOrderDocId === selectedOrder.docId}
-                          onClick={() => handleMarkOrderAsPosted(selectedOrder)}
-                          className="w-full inline-flex items-center justify-center gap-1.5 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-bold text-xs transition cursor-pointer"
-                        >
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          {postingOrderDocId === selectedOrder.docId ? "Menandai Terposting..." : "Posting"}
-                        </button>
-                      </div>
-                    )}
-
-                    {selectedOrder.status === "Selesai" && Boolean(selectedOrder.isPosted) && (
-                      <div className="pt-2">
-                        <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-sky-50 text-sky-700 border border-sky-200 text-xs font-semibold">
-                          Sudah Diposting
-                        </span>
-                      </div>
-                    )}
-
-                    {isBrandManager && (
-                      <div className="pt-4 border-t border-slate-200 flex items-center justify-end">
-                        <button
-                          type="button"
-                          disabled={isDeletingOrder}
-                          onClick={() => handleDeleteVideoOrder(selectedOrder)}
-                          className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 text-white text-xs font-bold transition cursor-pointer"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          {isDeletingOrder ? "Menghapus Orderan..." : "Hapus Orderan"}
-                        </button>
-                      </div>
-                    )}
-
-                    {selectedOrder.status !== "Kurasi BM" && selectedOrder.status !== "Review" && (
-                      <p className="text-[11px] text-slate-500">
-                        Tombol <span className="font-semibold">Revisi</span> dan <span className="font-semibold">Siap Posting</span> hanya aktif saat status <span className="font-semibold text-indigo-700">Kurasi BM</span> untuk Brand Manager.
-                      </p>
-                    )}
-
-                    {showRevisionInput && canCurateOrder(currentUser?.role) && (selectedOrder.status === "Kurasi BM" || selectedOrder.status === "Review") && (
-                      <form onSubmit={async (e) => {
-                        if (e && typeof e.preventDefault === "function") e.preventDefault();
-                        const currentOrderSnapshot = selectedOrder;
-                        const cleanNote = String(revisionNote || "").trim() || currentOrderSnapshot?.brief || "-";
-                        try {
-                          if (typeof handleRequestRevision === "function") {
-                            await handleRequestRevision(e);
-                          }
-                          if (currentOrderSnapshot?.docId && typeof updateDoc === "function" && typeof doc === "function" && typeof db !== "undefined" && db) {
-                            await updateDoc(doc(db, "orders", currentOrderSnapshot.docId), {
-                              status: "Revisi",
-                              revisionNote: cleanNote,
-                              updatedAt: typeof serverTimestamp === "function" ? serverTimestamp() : new Date().toISOString(),
-                            });
-                          }
-                          if (typeof setShowRevisionInput === "function") setShowRevisionInput(false);
-                          if (typeof setRevisionNote === "function") setRevisionNote("");
-                        } catch (err) {
-                          console.error("Gagal mengirim revisi order:", err);
-                        }
-                      }} className="p-3 rounded-xl bg-white border border-rose-200 space-y-2.5">
-                        <label className="block text-[11px] font-bold text-rose-800">Catatan Revisi untuk Editor (Opsional)</label>
-                        <textarea
-                          rows={2}
-                          value={revisionNote}
-                          onChange={(e) => setRevisionNote(e.target.value)}
-                          placeholder="Tulis bagian yang perlu diperbaiki..."
-                          className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs"
-                        />
-                        <div className="flex justify-end gap-2">
-                          <button type="button" onClick={() => setShowRevisionInput(false)} className="px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-semibold text-slate-600 cursor-pointer">Batal</button>
-                          <button type="submit" className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold cursor-pointer">Kirim Revisi + Notif WA Editor</button>
-                        </div>
-                      </form>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
+        <div className="xl:col-span-3 w-full">
+          <PostingSchedulePanel
+            orders={typeof orders !== "undefined" ? orders : []}
+            canEditSchedule={Boolean(isBrandManager || (typeof canCurateOrder === "function" && canCurateOrder(currentUser?.role)))}
+            onSelectOrder={(ord) => {
+              const targetOrderId = ord?.docId || ord?.id || null;
+              if (!targetOrderId) return;
+              if (typeof setActiveTiktokAccountId === "function") setActiveTiktokAccountId(null);
+              if (typeof setShowNotificationsModal === "function") setShowNotificationsModal(false);
+              if (typeof setSelectedOrderId === "function") setSelectedOrderId(targetOrderId);
+            }}
+          />
         </div>
-      )}
-
-      {isWaModalOpen && (
-        <div className="fixed inset-0 z-40 bg-slate-900/40 flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl border border-sky-100 max-w-2xl w-full p-6 shadow-xl my-8 space-y-5" style={{ backgroundImage: "linear-gradient(145deg, rgba(255, 255, 255, 0.92) 0%, rgba(240, 249, 255, 0.35) 58%, rgba(254, 243, 199, 0.38) 100%)" }}>
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <div className="flex items-center gap-2"><Bell className="w-5 h-5 text-amber-500" /><h3 className="font-bold text-base text-slate-900">Pengaturan & Log Notifikasi WhatsApp Otomatis</h3></div>
-              <button type="button" onClick={() => setIsWaModalOpen(false)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"><X className="w-4 h-4" /></button>
-            </div>
-            <form onSubmit={handleSaveMyWhatsApp} className="flex flex-col sm:flex-row gap-2.5">
-              <div className="flex-1">
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Nomor WA Terdaftar Akun Kamu ({currentUser.name})</label>
-                <input type="tel" value={editWaNumber} onChange={(e) => setEditWaNumber(e.target.value)} placeholder="6281234567890" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
-              </div>
-              <button type="submit" className="sm:self-end px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold cursor-pointer">Ganti Nomor WA</button>
-            </form>
-            <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-xs font-bold text-slate-700">Riwayat Notifikasi WA (Tersimpan di Firestore)</div>
-                <button type="button" onClick={handleMarkAllWaAsRead} className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold cursor-pointer">Tandai Semua Dibaca</button>
-              </div>
-              {(Array.isArray(waLogs) ? waLogs.length : 0) === 0 ? (
-                <p className="text-xs text-slate-400">Belum ada log notifikasi WA.</p>
-              ) : waLogs.map((log) => {
-                const isRead = (Array.isArray(readWaLogIds) && readWaLogIds.includes(log.id));
-                return (
-                  <div key={log.id} className={`p-3 rounded-xl border border-slate-200/80 text-xs space-y-1 ${isRead ? "bg-slate-100/70 opacity-65" : "bg-slate-50"}`}>
-                    <div className="flex items-center justify-between font-semibold text-slate-800">
-                      <span>{log.event} → {log.targetName} (+{log.phone})</span>
-                      <span className="text-[11px] text-slate-400">{log.time}</span>
-                    </div>
-                    <p className="text-slate-600">{log.message}</p>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      )}
-      {activeTiktokAccount && (() => {
-        const linkedOrders = (Array.isArray(orders) ? orders : []).filter(
-          (ord) => isOrderOwnedByCurrentAccount(ord) && isOrderMatchedToTiktokAccount(ord, activeTiktokAccount)
-        );
-        const readyToPostList = linkedOrders.filter(
-          (ord) => ord.status === "Selesai" && !ord.isPosted
-        );
-        const postedList = linkedOrders.filter(
-          (ord) => ord.status === "Selesai" && Boolean(ord.isPosted)
-        );
-        const inProgressList = linkedOrders.filter((ord) => ord.status !== "Selesai");
-
-        const q = (accountSearchQuery || "").trim().toLowerCase();
-        const filteredOrders = linkedOrders.filter((ord) => {
-          const matchesQuery =
-            !q ||
-            String(ord.id || "").toLowerCase().includes(q) ||
-            String(ord.title || "").toLowerCase().includes(q) ||
-            String(ord.brand || "").toLowerCase().includes(q);
-          const matchesStatus =
-            accountStatusFilter === "Semua" || ord.status === accountStatusFilter;
-          const matchesPlatform =
-            accountPlatformFilter === "Semua" || ord.platform === accountPlatformFilter;
-          return matchesQuery && matchesStatus && matchesPlatform;
-        });
-
-        const removedSet = new Set((Array.isArray(removedTtTypes) ? removedTtTypes : []).map((x) => String(x || "").trim().toLowerCase()));
-        const allAvailableTypes = Array.from(
-          new Map(
-            sanitizeContentTypes([
-              ...TIKTOK_CONTENT_TYPES,
-              ...(Array.isArray(editTtSelectedTypes) ? editTtSelectedTypes : []),
-            ])
-              .filter((t) => !removedSet.has(String(t || "").trim().toLowerCase()))
-              .map((t) => [String(t || "").trim().toLowerCase(), String(t || "").trim()])
-          ).values()
-        ).filter(Boolean);
-
-        return (
-          <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-2xl border border-slate-200 max-w-5xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
-              {/* Header */}
-              <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-4 bg-slate-50/70">
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center font-bold text-sm shrink-0">
-                    ♪
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="font-bold text-base text-slate-900 truncate">
-                        {activeTiktokAccount.accountName || activeTiktokAccount.brandName}
-                      </h3>
-                      <span className="px-2 py-0.5 rounded-full bg-slate-200/80 text-slate-700 text-[11px] font-semibold">
-                        {activeTiktokAccount.brandName}
-                      </span>
-                    </div>
-                    <p className="text-xs text-slate-500">
-                      Monitoring konten akun & manajemen akun TikTok
-                    </p>
-                  </div>
-                </div>
-
-                
-                <div className="relative z-20 flex items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => setActiveTiktokAccountId(null)}
-                  className="p-2 rounded-xl hover:bg-slate-200/70 text-slate-600 cursor-pointer shrink-0"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-                </div>
-              </div>
-
-              {/* Tab & Aksi Hapus (Khusus Brand Manager) */}
-              <div className="px-6 pt-3 border-b border-slate-200 flex items-center justify-between gap-3 flex-wrap bg-white">
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setTiktokDrawerTab("monitoring")}
-                    className={
-                      "px-3.5 py-2 text-xs font-semibold border-b-2 transition cursor-pointer " +
-                      (tiktokDrawerTab === "monitoring"
-                        ? "border-sky-600 text-sky-700"
-                        : "border-transparent text-slate-500 hover:text-slate-800")
-                    }
-                  >
-                    Daftar Konten Akun ({linkedOrders.length})
-                  </button>
-                  {isBrandManager && (
-                    <button
-                      type="button"
-                      onClick={() => setTiktokDrawerTab("edit")}
-                      className={
-                        "px-3.5 py-2 text-xs font-semibold border-b-2 transition cursor-pointer " +
-                        (tiktokDrawerTab === "edit"
-                          ? "border-sky-600 text-sky-700"
-                          : "border-transparent text-slate-500 hover:text-slate-800")
-                      }
-                    >
-                      Edit Akun & Jenis Konten
-                    </button>
-                  )}
-                </div>
-
-                {isBrandManager && (
-                  <button
-                    type="button"
-                    disabled={isDeletingTtAccount}
-                    onClick={handleDeleteTiktokAccount}
-                    className="mb-2 px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-semibold transition cursor-pointer disabled:opacity-50"
-                  >
-                    {isDeletingTtAccount ? "Menghapus..." : "Hapus Akun"}
-                  </button>
-                )}
-              </div>
-
-              {/* Body */}
-              <div className="p-6 overflow-y-auto space-y-5 flex-1 bg-slate-50/40">
-                {tiktokDrawerTab === "monitoring" || !isBrandManager ? (
-                  <>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                      <div className="rounded-xl border border-slate-200 bg-white p-3.5">
-                        <div className="text-[11px] font-semibold text-slate-600 uppercase">
-                          Dalam Produksi
-                        </div>
-                        <div className="text-2xl font-bold text-slate-900 mt-0.5">
-                          {inProgressList.length}
-                        </div>
-                        <div className="text-[11px] text-slate-500">
-                          Antrean / Proses / Review / Revisi
-                        </div>
-                      </div>
-
-                      <div className="rounded-xl border border-emerald-200 bg-white p-3.5">
-                        <div className="text-[11px] font-semibold text-emerald-700 uppercase">
-                          Siap Posting
-                        </div>
-                        <div className="text-2xl font-bold text-slate-900 mt-0.5">
-                          {readyToPostList.length}
-                        </div>
-                        <div className="text-[11px] text-slate-500">
-                          Status "Selesai" & belum diposting
-                        </div>
-                      </div>
-
-                      <div className="rounded-xl border border-sky-200 bg-white p-3.5">
-                        <div className="text-[11px] font-semibold text-sky-700 uppercase">
-                          Sudah Diposting
-                        </div>
-                        <div className="text-2xl font-bold text-slate-900 mt-0.5">
-                          {postedList.length}
-                        </div>
-                        <div className="text-[11px] text-slate-500">
-                          Sudah ditandai terposting di Detail Order
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Baris Cari ID Order, Judul Konten, atau Brand + Filter Status & Platform */}
-                    <div className="bg-white rounded-2xl border border-slate-200 p-4 flex flex-col md:flex-row items-stretch md:items-center gap-3">
-                      <input
-                        type="text"
-                        value={accountSearchQuery}
-                        onChange={(e) => setAccountSearchQuery(e.target.value)}
-                        placeholder="Cari ID order, judul konten, atau brand..."
-                        className="flex-1 px-3.5 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-sky-500"
-                      />
-                      <select
-                        value={accountStatusFilter}
-                        onChange={(e) => setAccountStatusFilter(e.target.value)}
-                        className="px-3.5 py-2 rounded-xl border border-slate-300 text-sm bg-white text-slate-700 focus:outline-none focus:border-sky-500"
-                      >
-                        <option value="Semua">Semua Status</option>
-                        {Object.keys(STATUS_CONFIG || {}).map((st) => (
-                          <option key={st} value={st}>
-                            {st}
-                          </option>
-                        ))}
-                      </select>
-                      <select
-                        value={accountPlatformFilter}
-                        onChange={(e) => setAccountPlatformFilter(e.target.value)}
-                        className="px-3.5 py-2 rounded-xl border border-slate-300 text-sm bg-white text-slate-700 focus:outline-none focus:border-sky-500"
-                      >
-                        <option value="Semua">Semua Platform</option>
-                        {(PLATFORMS || ["TikTok", "Instagram Reels", "YouTube Shorts"]).map((pf) => (
-                          <option key={pf} value={pf}>
-                            {pf}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    {/* Grid Kotak-Kotak (Card Grid) Daftar Konten Akun */}
-                    {filteredOrders.length === 0 ? (
-                      <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center text-xs text-slate-500">
-                        Belum ada konten order yang sesuai dengan filter pada akun ini.
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        {filteredOrders.map((ord) => {
-                          const stCfg = STATUS_CONFIG[ord.status] || {
-                            label: ord.status || "Antrean",
-                            badgeClass: "bg-slate-100 text-slate-700 border-slate-200",
-                            dotClass: "bg-slate-500",
-                          };
-                          const isReady = ord.status === "Selesai" && !ord.isPosted;
-                          const isPosted = ord.status === "Selesai" && Boolean(ord.isPosted);
-
-                          return (
-                            <div
-                              key={ord.docId || ord.id}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (typeof setActiveTiktokAccountId === "function") setActiveTiktokAccountId(null);
-                                if (typeof setSelectedOrderId === "function") setSelectedOrderId(ord.docId || ord.id);
-                              }}
-                              className="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs hover:border-sky-400 transition flex flex-col justify-between gap-4 cursor-pointer"
-                            >
-                              <div className="space-y-2.5">
-                                <div className="flex items-center justify-between gap-2">
-                                  <span className="px-2.5 py-1 rounded-lg bg-sky-50 text-sky-700 text-[11px] font-bold truncate">
-                                    {ord.id} • {ord.brand || activeTiktokAccount.brandName}
-                                  </span>
-                                  <span
-                                    className={
-                                      "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border text-[11px] font-semibold shrink-0 " +
-                                      (isPosted
-                                        ? "bg-sky-50 text-sky-700 border-sky-200"
-                                        : isReady
-                                          ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                                          : stCfg.badgeClass)
-                                    }
-                                  >
-                                    <span
-                                      className={
-                                        "w-1.5 h-1.5 rounded-full " +
-                                        (isPosted
-                                          ? "bg-sky-500"
-                                          : isReady
-                                            ? "bg-emerald-500"
-                                            : stCfg.dotClass || "bg-slate-500")
-                                      }
-                                    />
-                                    {isPosted ? "Sudah Diposting" : isReady ? "Siap Posting" : stCfg.label}
-                                  </span>
-                                </div>
-
-                                <div>
-                                  <h4 className="font-bold text-sm text-slate-900 line-clamp-1">
-                                    {ord.title}
-                                  </h4>
-                                  <p className="text-xs text-slate-500 line-clamp-2 mt-0.5">
-                                    {ord.brief || ord.contentType || "-"}
-                                  </p>
-                                </div>
-                              </div>
-
-                              <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2 text-xs">
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <span className="px-2 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200/80 text-[11px] font-semibold truncate">
-                                    {ord.platform || "TikTok"} ({ord.aspectRatio || "9:16"})
-                                  </span>
-                                  <span className="text-[11px] text-slate-500 truncate">
-                                    {ord.deadline || "-"}
-                                  </span>
-                                </div>
-
-                                <span className="inline-flex items-center gap-0.5 text-xs font-bold text-sky-700 shrink-0">
-                                  <span>Detail</span>
-                                  <ChevronRight className="w-3.5 h-3.5" />
-                                </span>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </>
-                ) : !canEditTiktokCard ? (
-                  <div className="bg-white rounded-2xl border border-slate-200 p-5 text-xs text-slate-600">
-                    Pengubahan data akun TikTok hanya tersedia untuk Brand Manager.
-                  </div>
-                ) : (
-                  /* Tab Edit Akun & Jenis Konten (Khusus Brand Manager) */
-                  <form
-                    onSubmit={handleUpdateTiktokAccountDetail}
-                    className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4"
-                  >
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-700 mb-1">
-                          Nama Brand
-                        </label>
-                        <input
-                          type="text"
-                          value={editTtBrandName}
-                          onChange={(e) => setEditTtBrandName(e.target.value)}
-                          placeholder="Contoh: PrimaGold"
-                          className="w-full px-3.5 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-sky-500"
-                          required
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-700 mb-1">
-                          Handle / Akun TikTok
-                        </label>
-                        <input
-                          type="text"
-                          value={editTtAccountName}
-                          onChange={(e) => setEditTtAccountName(e.target.value)}
-                          placeholder="@primagold_official"
-                          className="w-full px-3.5 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-sky-500"
-                          required
-                        />
-                      </div>
-                    </div>
-
-                    {/* LOGO_EDIT_SECTION */}
-                    <div className="space-y-2">
-                      <label className="block text-xs font-semibold text-slate-700">Logo Brand</label>
-                      <div className="flex flex-wrap items-center gap-3">
-                        <div className="w-12 h-12 rounded-xl border border-slate-200 bg-slate-50 flex items-center justify-center overflow-hidden shrink-0">
-                          {editTtBrandLogo ? (
-                            <img src={editTtBrandLogo} alt="Logo Brand" className="w-full h-full object-cover" />
-                          ) : (
-                            <span className="text-[11px] font-bold text-slate-400">LOGO</span>
-                          )}
-                        </div>
-                        <label className="px-3 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 cursor-pointer">
-                          Pilih / Ganti Logo
-                          <input
-                            type="file"
-                            accept="image/*"
-                            onChange={(e) => handleTtLogoFileChange(e, "edit")}
-                            className="hidden"
-                          />
-                        </label>
-                        {editTtBrandLogo && (
-                          <button
-                            type="button"
-                            onClick={() => setEditTtBrandLogo("")}
-                            className="px-3 py-2 rounded-xl text-xs font-semibold text-rose-600 hover:bg-rose-50 cursor-pointer"
-                          >
-                            Hapus Logo
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="block text-xs font-semibold text-slate-700">
-                        Jenis Konten Akun (Tambah / Hapus Tag)
-                      </label>
-                      <div className="flex flex-wrap gap-2">
-                        {allAvailableTypes.map((typeName) => {
-                          const active = (Array.isArray(editTtSelectedTypes) ? editTtSelectedTypes : []).includes(
-                            typeName
-                          );
-                          const isCustomTag =
-                            !(Array.isArray(TIKTOK_CONTENT_TYPES) ? TIKTOK_CONTENT_TYPES : []).some(
-                              (base) => String(base || "").trim().toLowerCase() === String(typeName || "").trim().toLowerCase()
-                            );
-                          const handleRemoveTag = (e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            const targetKey = String(typeName || "").trim().toLowerCase();
-                            setRemovedTtTypes((prev) => {
-                              const next = Array.from(
-                                new Set([...(Array.isArray(prev) ? prev : []), String(typeName || "").trim()])
-                              );
-                              try {
-                                localStorage.setItem("cf_removed_tiktok_content_types", JSON.stringify(next));
-                              } catch {}
-                              return next;
-                            });
-                            setEditTtSelectedTypes((prev) =>
-                              (Array.isArray(prev) ? prev : []).filter(
-                                (item) => String(item || "").trim().toLowerCase() !== targetKey
-                              )
-                            );
-                            if (isCustomTag && typeof setBrandManagerContentTypes === "function") {
-                              setBrandManagerContentTypes((prev) =>
-                                (Array.isArray(prev) ? prev : []).filter(
-                                  (item) => String(item || "").trim().toLowerCase() !== targetKey
-                                )
-                              );
-                            }
-                          };
-                          return (
-                            <div
-                              key={typeName}
-                              className={
-                                "inline-flex items-center rounded-xl text-xs font-semibold border transition overflow-hidden " +
-                                (active
-                                  ? "bg-emerald-600 text-white border-emerald-600"
-                                  : "bg-white text-slate-600 border-slate-300 hover:bg-slate-50")
-                              }
-                            >
-                              <button
-                                type="button"
-                                onClick={() => toggleEditTtContentType(typeName)}
-                                className="px-3 py-1.5 cursor-pointer flex items-center gap-1"
-                              >
-                                <span>{active ? "✓" : "+"}</span>
-                                <span>{typeName}</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={handleRemoveTag}
-                                title={"Hapus tag " + typeName}
-                                aria-label={"Hapus tag " + typeName}
-                                className={
-                                  "pr-2 pl-1 py-1.5 cursor-pointer transition leading-none " +
-                                  (active
-                                    ? "text-emerald-100 hover:text-white hover:bg-emerald-700/60"
-                                    : "text-slate-400 hover:text-rose-600 hover:bg-rose-50")
-                                }
-                              >
-                                ×
-                              </button>
-                            </div>
-                          );
-                        })}
-                      </div>
-
-                      <div className="flex items-center gap-2 pt-2">
-                        <input
-                          type="text"
-                          value={editTtCustomType}
-                          onChange={(e) => setEditTtCustomType(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              e.preventDefault();
-                              handleAddEditTtCustomType();
-                            }
-                          }}
-                          placeholder="Tambah jenis konten kustom baru..."
-                          className="flex-1 px-3.5 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:border-sky-500"
-                        />
-                        <button
-                          type="button"
-                          onClick={handleAddEditTtCustomType}
-                          className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold cursor-pointer"
-                        >
-                          Tambah Tag
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setTiktokDrawerTab("monitoring")}
-                        className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50 cursor-pointer"
-                      >
-                        Batal
-                      </button>
-                      <button
-                        type="submit"
-                        disabled={isSavingTtEdit}
-                        className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold transition cursor-pointer disabled:opacity-50"
-                      >
-                        {isSavingTtEdit ? "Menyimpan..." : "Simpan Perubahan Akun"}
-                      </button>
-                    </div>
-                  </form>
-                )}
-              </div>
-            </div>
-          </div>
-        );
-      })()}
-
-      {isAddTiktokModalOpen && canCreateTiktokAccount(currentUser?.role) && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl border border-slate-200 max-w-md w-full p-6 shadow-xl space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-base text-slate-900">Tambah Akun TikTok</h3>
-              <button
-                type="button"
-                onClick={() => setIsAddTiktokModalOpen(false)}
-                className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            {/* LOGO_ADD_SECTION */}
-            <div className="space-y-1.5">
-              <label className="block text-xs font-semibold text-slate-700">Logo Brand (Opsional)</label>
-              <div className="flex items-center gap-3">
-                <div className="w-11 h-11 rounded-xl border border-slate-200 bg-slate-50 flex items-center justify-center overflow-hidden shrink-0">
-                  {ttBrandLogo ? (
-                    <img src={ttBrandLogo} alt="Preview Logo Brand" className="w-full h-full object-cover" />
-                  ) : (
-                    <span className="text-[10px] font-bold text-slate-400">LOGO</span>
-                  )}
-                </div>
-                <label className="px-3 py-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 cursor-pointer">
-                  Upload Logo
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => handleTtLogoFileChange(e, "add")}
-                    className="hidden"
-                  />
-                </label>
-                {ttBrandLogo && (
-                  <button
-                    type="button"
-                    onClick={() => setTtBrandLogo("")}
-                    className="text-xs font-semibold text-rose-600 hover:underline cursor-pointer"
-                  >
-                    Hapus
-                  </button>
-                )}
-              </div>
-            </div>
-            <form onSubmit={handleSaveTiktokAccount} className="space-y-3.5">
-                            <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Nama Brand <span className="text-rose-600">*</span></label>
-                <input
-                  type="text"
-                  required
-                  value={ttBrandName}
-                  onChange={(e) => setTtBrandName(e.target.value)}
-                  placeholder="Contoh: PrimaGold"
-                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Nama Akun TikTok <span className="text-rose-600">*</span></label>
-                <input
-                  type="text"
-                  required
-                  value={ttAccountName}
-                  onChange={(e) => setTtAccountName(e.target.value)}
-                  placeholder="Contoh: @primagold.id"
-                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                  Pilihan Jenis Konten (Bisa pilih lebih dari 1) <span className="text-rose-600">*</span>
-                </label>
-                <div className="space-y-1.5 max-h-52 overflow-y-auto p-2.5 rounded-xl border border-slate-200 bg-slate-50/70">
-                  {sanitizeContentTypes([...(Array.isArray(tiktokAccounts) ? tiktokAccounts.flatMap((acc) => acc?.contentTypes || []) : []), ...(Array.isArray(brandManagerContentTypes) ? brandManagerContentTypes : []), ...(Array.isArray(TIKTOK_CONTENT_TYPES) ? TIKTOK_CONTENT_TYPES : [])]).map((ct) => {
-                    const checked = ttSelectedTypes.includes(ct);
-                    return (
-                      <label key={ct} className="flex items-center gap-2 text-xs text-slate-800 cursor-pointer py-0.5">
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => toggleTtContentType(ct)}
-                          className="rounded border-slate-300"
-                        />
-                        <span>{ct}</span>
-                      </label>
-                    );
-                  })}
-                </div>
-                {(Array.isArray(ttSelectedTypes) ? ttSelectedTypes.length : 0) === 0 && (
-                  <p className="text-[11px] text-rose-600 mt-1">Pilih minimal 1 jenis konten.</p>
-                )}
-              </div>
-              <div className="pt-2 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsAddTiktokModalOpen(false)}
-                  className="px-4 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 cursor-pointer"
-                >
-                  Batal
-                </button>
-                <button
-                  type="submit"
-                  disabled={(Array.isArray(ttSelectedTypes) ? ttSelectedTypes.length : 0) === 0}
-                  className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white text-xs font-semibold cursor-pointer"
-                >
-                  Simpan Akun TikTok
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      </div>
     </div>
-      {pendingDeleteOrder && (
-        <div className="fixed inset-0 z-[70] bg-slate-900/60 backdrop-blur-[1px] flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl border border-rose-200 shadow-2xl max-w-md w-full p-6 space-y-4">
-            <div className="space-y-1.5">
-              <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-50 text-rose-700 border border-rose-200 text-xs font-bold">
-                Peringatan Penghapusan Orderan
-              </div>
-              <h3 className="text-lg font-bold text-slate-900">
-                Hapus Orderan Video?
-              </h3>
-              <p className="text-sm text-slate-600 leading-relaxed">
-                Orderan video{" "}
-                <span className="font-bold text-slate-900">
-                  {pendingDeleteOrder.id ? `${pendingDeleteOrder.id} - ` : ""}
-                  {pendingDeleteOrder.title || "tanpa judul"}
-                </span>{" "}
-                akan dihapus secara permanen dan tidak dapat dikembalikan. Apakah Anda yakin ingin melanjutkan?
-              </p>
-            </div>
-
-            <div className="flex items-center justify-end gap-2 pt-2">
-              <button
-                type="button"
-                disabled={isDeletingOrder}
-                onClick={() => setPendingDeleteOrder(null)}
-                className="px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold transition cursor-pointer"
-              >
-                Batal
-              </button>
-              <button
-                type="button"
-                disabled={isDeletingOrder}
-                onClick={confirmDeleteVideoOrder}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 text-white text-xs font-bold transition cursor-pointer"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                {isDeletingOrder ? "Menghapus..." : "Ya, Hapus Orderan"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
-
   );
 }
+
+
 
 export default function App() {
   return (

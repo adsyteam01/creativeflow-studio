@@ -29,7 +29,6 @@ const ROLE_ALIASES = {
   produksi: WORKFLOW_ROLES.PRODUCTION,
   "team produksi": WORKFLOW_ROLES.PRODUCTION,
   tim_produksi: WORKFLOW_ROLES.PRODUCTION,
-  "tim produksi": WORKFLOW_ROLES.PRODUCTION,
   editor: WORKFLOW_ROLES.EDITOR,
   video_editor: WORKFLOW_ROLES.EDITOR,
   "video editor": WORKFLOW_ROLES.EDITOR,
@@ -68,6 +67,10 @@ export function canViewAllTiktokAccounts(rawRole) {
 }
 
 export function canCreateTiktokAccount(rawRole) {
+  return normalizeWorkflowRole(rawRole) === WORKFLOW_ROLES.BRAND_MANAGER;
+}
+
+export function canEditTiktokCard(rawRole) {
   return normalizeWorkflowRole(rawRole) === WORKFLOW_ROLES.BRAND_MANAGER;
 }
 

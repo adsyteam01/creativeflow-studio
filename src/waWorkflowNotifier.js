@@ -2,6 +2,126 @@ import { ORDER_STATUSES, WORKFLOW_ROLES, normalizeWorkflowRole } from "./workflo
 
 const sentNotificationKeys = new Set();
 
+// Notifikasi WA saat order mulai dikerjakan ("work_started" / "Sedang Dikerjakan") dimatikan
+export const MUTE_WA_WHILE_IN_PROGRESS = true;
+
+// Notifikasi WA saat order sudah diposting ("posted_completed") dimatikan
+export const MUTE_WA_WHEN_POSTED = true;
+
+export const ALLOWED_WA_EVENTS = [
+  "order_created",
+  "ready_for_review",
+  "revision_requested",
+  "revision_completed",
+  "ready_to_post",
+  "posted_completed",
+];
+
+const ALL_EDITORS_TOKENS = new Set([
+  "all",
+  "semua",
+  "semua editor",
+  "all editor",
+  "all editors",
+  "all_editors",
+  "all_editor",
+  "semua_editor",
+  "semua-editor",
+  "all-editors",
+  "*",
+]);
+
+function isProductionOrBmActor(actor = {}) {
+  if (!actor || typeof actor !== "object") return true;
+  const rawRole = String(actor.role || actor.userRole || actor.workflowRole || "")
+    .trim()
+    .toLowerCase();
+  if (!rawRole) return true;
+  if (rawRole === "dm" || rawRole.includes("director") || rawRole.includes("manager")) {
+    return true;
+  }
+  const normalized = normalizeWorkflowRole(rawRole, "");
+  return (
+    normalized === WORKFLOW_ROLES.PRODUCTION ||
+    normalized === WORKFLOW_ROLES.BRAND_MANAGER
+  );
+}
+
+function isAllEditorsSelection(order = {}) {
+  if (!order || typeof order !== "object") return false;
+
+  const booleanFlags = [
+    order.assignToAllEditors,
+    order.allEditors,
+    order.broadcastEditors,
+    order.targetAllEditors,
+    order.sendToAllEditors,
+  ];
+  if (booleanFlags.some((v) => v === true)) return true;
+
+  const candidateFields = [
+    order.assignedEditor,
+    order.assignedEditorId,
+    order.assignedEditorUid,
+    order.editorName,
+    order.editor,
+    order.editorId,
+    order.editorUid,
+    order.targetEditor,
+    order.targetEditors,
+  ];
+
+  for (const val of candidateFields) {
+    if (Array.isArray(val)) {
+      if (val.some((item) => ALL_EDITORS_TOKENS.has(String(item || "").trim().toLowerCase()))) {
+        return true;
+      }
+      continue;
+    }
+    const normalizedStr = String(val || "").trim().toLowerCase();
+    if (normalizedStr && ALL_EDITORS_TOKENS.has(normalizedStr)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isInProgressWorkEvent(eventType, order = {}) {
+  const statusVal = String(order?.status || "").trim().toLowerCase();
+  const inProgressLabel = String(ORDER_STATUSES?.IN_PROGRESS || "Sedang Dikerjakan")
+    .trim()
+    .toLowerCase();
+  return (
+    eventType === "work_started" ||
+    statusVal === "sedang dikerjakan" ||
+    (inProgressLabel && statusVal === inProgressLabel)
+  );
+}
+
+function isPostedCompletedEvent(eventType, order = {}) {
+  const statusVal = String(order?.status || "").trim().toLowerCase();
+  const postedLabel = String(ORDER_STATUSES?.POSTED || "Sudah Diposting")
+    .trim()
+    .toLowerCase();
+  return (
+    eventType === "posted_completed" ||
+    statusVal === "sudah diposting" ||
+    statusVal === "diposting" ||
+    (postedLabel && statusVal === postedLabel)
+  );
+}
+
+function isMutedEvent(eventType, order = {}) {
+  if (MUTE_WA_WHILE_IN_PROGRESS && isInProgressWorkEvent(eventType, order)) {
+    return "in_progress";
+  }
+  if (MUTE_WA_WHEN_POSTED && isPostedCompletedEvent(eventType, order)) {
+    return "posted_completed";
+  }
+  return "";
+}
+
 export function normalizeWaPhone(rawPhone) {
   const digits = String(rawPhone || "").replace(/[^0-9]/g, "");
   if (!digits) return "";
@@ -19,6 +139,39 @@ function buildHeader(recipientName, title) {
   return `Hai *${safeName}* 🎥,\n\n*${title}*\n`;
 }
 
+function matchUserByIdentifiers(member, identifiers = [], names = []) {
+  const cleanIds = identifiers
+    .map((v) => String(v || "").trim().toLowerCase())
+    .filter((v) => v && !ALL_EDITORS_TOKENS.has(v));
+  const cleanNames = names
+    .map((v) => String(v || "").trim().toLowerCase())
+    .filter((v) => v && !ALL_EDITORS_TOKENS.has(v));
+
+  const memberIds = [
+    member?.uid,
+    member?.userId,
+    member?.id,
+    member?.docId,
+    member?.email,
+  ]
+    .map((v) => String(v || "").trim().toLowerCase())
+    .filter(Boolean);
+
+  const memberNames = [
+    member?.name,
+    member?.displayName,
+    member?.fullName,
+  ]
+    .map((v) => String(v || "").trim().toLowerCase())
+    .filter(Boolean);
+
+  const idMatch = cleanIds.length > 0 && memberIds.some((id) => cleanIds.includes(id));
+  const nameMatch =
+    cleanNames.length > 0 && memberNames.some((nm) => cleanNames.includes(nm));
+
+  return idMatch || nameMatch;
+}
+
 export function formatWorkflowWaMessage({
   eventType,
   recipientName,
@@ -28,21 +181,24 @@ export function formatWorkflowWaMessage({
   note = "",
   postUrl = "",
 }) {
-  const orderCode = order.orderCode || order.code || order.id || "-";
+  if (isMutedEvent(eventType, order)) return "";
+  if (!ALLOWED_WA_EVENTS.includes(eventType)) return "";
+
   const orderTitle = order.title || order.judul || "Order Video";
   const brandName = order.brandName || order.brand || "-";
   const deadline = order.deadline || "-";
   const briefNote = String(note || order.briefNote || order.brief || "-").trim() || "-";
-  const cleanVideoUrl = String(videoUrl || order.videoUrl || order.resultUrl || "-").trim() || "-";
-  const cleanPostUrl = String(postUrl || order.postUrl || order.publishedUrl || "-").trim() || "-";
+  const cleanVideoUrl =
+    String(videoUrl || order.videoUrl || order.previewUrl || order.resultUrl || "-").trim() || "-";
+  const cleanPostUrl =
+    String(postUrl || order.postUrl || order.publishedUrl || "-").trim() || "-";
 
-  if (eventType === "job_assigned" || eventType === "order_created") {
-    const statusLabel = order.status || ORDER_STATUSES.QUEUE;
+  if (eventType === "order_created") {
     return (
-      buildHeader(recipientName, "[CreativeFlow] Job Baru untuk Editor") +
-      `• *Order:* ${orderCode} — ${orderTitle}\n` +
+      buildHeader(recipientName, "[CreativeFlow] Order Baru untuk Editor") +
+      `• *Order:* ${orderTitle}\n` +
       `• *Brand/Produk:* ${brandName}\n` +
-      `• *Status:* ${statusLabel}\n` +
+      `• *Status:* ${order.status || ORDER_STATUSES.QUEUE}\n` +
       `• *Dibuat oleh:* ${actorName}\n` +
       `• *Deadline:* ${deadline}\n` +
       `• *Catatan Brief:* ${briefNote}\n\n` +
@@ -50,123 +206,174 @@ export function formatWorkflowWaMessage({
     );
   }
 
-  if (eventType === "submitted_for_curation") {
+  if (eventType === "ready_for_review") {
     return (
-      buildHeader(recipientName, "[CreativeFlow] Video Siap Dikurasi BM") +
-      `• *Order:* ${orderCode} — ${orderTitle}\n` +
+      buildHeader(recipientName, "[CreativeFlow] Video Siap di-Review BM") +
+      `• *Order:* ${orderTitle}\n` +
       `• *Brand/Produk:* ${brandName}\n` +
       `• *Status:* ${ORDER_STATUSES.BM_CURATION}\n` +
       `• *Editor:* ${actorName}\n` +
       `• *Link Video:* ${cleanVideoUrl}\n` +
-      `• *Catatan Editor:* ${briefNote}\n\n` +
-      `Mohon dilakukan kurasi video (Approve ke *Siap Posting* atau kembalikan ke *Revisi*).`
+      `• *Catatan:* ${briefNote}\n\n` +
+      `Mohon lakukan review video (Approve ke *Siap Posting* atau kembalikan ke *Revisi*).`
     );
   }
 
   if (eventType === "revision_requested") {
     return (
       buildHeader(recipientName, "[CreativeFlow] Permintaan Revisi Video") +
-      `• *Order:* ${orderCode} — ${orderTitle}\n` +
+      `• *Order:* ${orderTitle}\n` +
       `• *Brand/Produk:* ${brandName}\n` +
       `• *Status:* ${ORDER_STATUSES.REVISION}\n` +
-      `• *Dikurasi oleh (BM):* ${actorName}\n` +
+      `• *BM yang Merevisi:* ${actorName}\n` +
       `• *Catatan Revisi:*\n${briefNote}\n\n` +
-      `Silakan perbaiki sesuai catatan lalu submit ulang untuk kurasi BM.`
+      `Silakan kerjakan revisi sesuai catatan lalu submit ulang untuk di-review.`
+    );
+  }
+
+  if (eventType === "revision_completed") {
+    return (
+      buildHeader(recipientName, "[CreativeFlow] Revisi Selesai & Siap di-Review") +
+      `• *Order:* ${orderTitle}\n` +
+      `• *Brand/Produk:* ${brandName}\n` +
+      `• *Status:* ${ORDER_STATUSES.BM_CURATION}\n` +
+      `• *Editor:* ${actorName}\n` +
+      `• *Link Video Revisi:* ${cleanVideoUrl}\n` +
+      `• *Catatan:* ${briefNote}\n\n` +
+      `Revisi sudah selesai dikerjakan dan siap untuk di-review kembali.`
     );
   }
 
   if (eventType === "ready_to_post") {
     return (
-      buildHeader(recipientName, "[CreativeFlow] Konten Siap Posting (SMM)") +
-      `• *Order:* ${orderCode} — ${orderTitle}\n` +
+      buildHeader(recipientName, "[CreativeFlow] Video Siap Posting") +
+      `• *Order:* ${orderTitle}\n` +
       `• *Brand/Produk:* ${brandName}\n` +
       `• *Status:* ${ORDER_STATUSES.READY_TO_POST}\n` +
-      `• *Disetujui oleh (BM):* ${actorName}\n` +
+      `• *Disetujui oleh:* ${actorName}\n` +
       `• *Link Video Final:* ${cleanVideoUrl}\n` +
       `• *Catatan Publikasi:* ${briefNote}\n\n` +
-      `Konten sudah lolos kurasi dan siap dijadwalkan/diposting oleh SMM.`
+      `Video sudah lolos review dan siap diposting oleh Publisher.`
     );
   }
 
   if (eventType === "posted_completed") {
     return (
       buildHeader(recipientName, "[CreativeFlow] Video Sudah Diposting") +
-      `• *Order:* ${orderCode} — ${orderTitle}\n` +
+      `• *Order:* ${orderTitle}\n` +
       `• *Brand/Produk:* ${brandName}\n` +
       `• *Status:* ${ORDER_STATUSES.POSTED}\n` +
-      `• *Diposting oleh (SMM):* ${actorName}\n` +
-      `• *Waktu/Link Tayang:* ${cleanPostUrl}\n\n` +
-      `Proses produksi hingga publikasi untuk order ini telah selesai.`
+      `• *Diposting oleh:* ${actorName}\n` +
+      `• *Link/Waktu Tayang:* ${cleanPostUrl}\n\n` +
+      `Video telah berhasil diposting.`
     );
   }
 
-  return (
-    buildHeader(recipientName, "[CreativeFlow] Update Status Order") +
-    `• *Order:* ${orderCode} — ${orderTitle}\n` +
-    `• *Brand/Produk:* ${brandName}\n` +
-    `• *Status:* ${order.status || "-"}\n` +
-    `• *Diperbarui oleh:* ${actorName}\n` +
-    `• *Catatan:* ${briefNote}`
-  );
+  return "";
 }
 
-export function resolveWorkflowRecipients({ eventType, order = {}, teamMembers = [], actorId = "" }) {
+export function resolveWorkflowRecipients({
+  eventType,
+  order = {},
+  teamMembers = [],
+  actorId = "",
+  actor = {},
+}) {
+  if (isMutedEvent(eventType, order)) return [];
+  if (!ALLOWED_WA_EVENTS.includes(eventType)) return [];
+
   const members = Array.isArray(teamMembers) ? teamMembers : [];
   const byRole = (targetRole) =>
     members.filter((m) => normalizeWorkflowRole(m?.role) === targetRole);
 
   const actorKey = String(actorId || "").trim().toLowerCase();
   const notActor = (m) => {
+    if (!actorKey) return true;
     const mKeys = [m?.uid, m?.userId, m?.id, m?.docId, m?.email]
       .filter(Boolean)
       .map((v) => String(v).trim().toLowerCase());
-    return !actorKey || !mKeys.includes(actorKey);
+    return !mKeys.includes(actorKey);
   };
 
   let targets = [];
 
-  if (eventType === "job_assigned" || eventType === "order_created") {
-    const assignedId = String(order.assignedEditorId || order.editorId || "").trim().toLowerCase();
-    const assignedName = String(order.assignedEditor || order.editorName || "").trim().toLowerCase();
-    targets = byRole(WORKFLOW_ROLES.EDITOR).filter((m) => {
-      const idMatch =
-        assignedId &&
-        [m?.uid, m?.userId, m?.id, m?.docId]
-          .filter(Boolean)
-          .some((v) => String(v).trim().toLowerCase() === assignedId);
-      const nameMatch =
-        assignedName && String(m?.name || m?.displayName || "").trim().toLowerCase() === assignedName;
-      return idMatch || nameMatch;
-    });
-  } else if (eventType === "submitted_for_curation") {
+  if (eventType === "order_created") {
+    if (isAllEditorsSelection(order) && isProductionOrBmActor(actor)) {
+      targets = byRole(WORKFLOW_ROLES.EDITOR);
+    } else {
+      const editorIds = [
+        order.assignedEditorUid,
+        order.assignedEditorId,
+        order.assignedEditorEmail,
+        order.editorUid,
+        order.editorId,
+        order.editorEmail,
+      ];
+      const editorNames = [
+        order.assignedEditor,
+        order.editorName,
+        order.editor,
+      ];
+      targets = members.filter((m) => matchUserByIdentifiers(m, editorIds, editorNames));
+    }
+  } else if (eventType === "ready_for_review") {
     targets = byRole(WORKFLOW_ROLES.BRAND_MANAGER).filter(notActor);
   } else if (eventType === "revision_requested") {
-    const assignedId = String(order.assignedEditorId || order.editorId || "").trim().toLowerCase();
-    const assignedName = String(order.assignedEditor || order.editorName || "").trim().toLowerCase();
-    targets = byRole(WORKFLOW_ROLES.EDITOR).filter((m) => {
-      const idMatch =
-        assignedId &&
-        [m?.uid, m?.userId, m?.id, m?.docId]
-          .filter(Boolean)
-          .some((v) => String(v).trim().toLowerCase() === assignedId);
-      const nameMatch =
-        assignedName && String(m?.name || m?.displayName || "").trim().toLowerCase() === assignedName;
-      return idMatch || nameMatch;
-    });
+    const editorIds = [
+      order.assignedEditorUid,
+      order.assignedEditorId,
+      order.assignedEditorEmail,
+      order.editorUid,
+      order.editorId,
+      order.editorEmail,
+      order.claimedByUid,
+      order.claimedById,
+      order.claimedByEmail,
+      order.submittedByEmail,
+    ];
+    const editorNames = [
+      order.assignedEditor,
+      order.editorName,
+      order.editor,
+      order.claimedBy,
+      order.submittedBy,
+      order.submittedByName,
+    ];
+    targets = members.filter((m) => matchUserByIdentifiers(m, editorIds, editorNames));
+  } else if (eventType === "revision_completed") {
+    const reviewerIds = [
+      order.reviewedByUid,
+      order.reviewedById,
+      order.reviewedByEmail,
+      order.revisionByUid,
+      order.revisionById,
+      order.curatedByUid,
+      order.curatedById,
+      order.lastReviewerId,
+    ];
+    const reviewerNames = [
+      order.reviewedBy,
+      order.revisionBy,
+      order.bmName,
+      order.curatedBy,
+      order.lastReviewer,
+    ];
+    targets = members
+      .filter((m) => matchUserByIdentifiers(m, reviewerIds, reviewerNames))
+      .filter(notActor);
   } else if (eventType === "ready_to_post") {
-    targets = byRole(WORKFLOW_ROLES.SOCIAL_MEDIA_MANAGER).filter(notActor);
+    targets = byRole(WORKFLOW_ROLES.PUBLISHER).filter(notActor);
   } else if (eventType === "posted_completed") {
-    targets = [
-      ...byRole(WORKFLOW_ROLES.BRAND_MANAGER),
-      ...byRole(WORKFLOW_ROLES.PRODUCTION),
-    ].filter(notActor);
+    targets = byRole(WORKFLOW_ROLES.BRAND_MANAGER).filter(notActor);
   }
 
   const seenPhones = new Set();
   return targets
     .map((member) => {
-      const phone = normalizeWaPhone(member?.phone || member?.whatsapp || member?.wa || "");
-      const name = member?.name || member?.displayName || "Tim";
+      const phone = normalizeWaPhone(
+        member?.phone || member?.whatsapp || member?.wa || member?.whatsappNumber || ""
+      );
+      const name = member?.name || member?.displayName || member?.fullName || "Tim";
       return { member, name, phone, valid: isValidWaPhone(phone) };
     })
     .filter((item) => {
@@ -187,17 +394,26 @@ export async function dispatchWorkflowWaNotifications({
   sendFn,
   onLog,
 }) {
+  const mutedReason = isMutedEvent(eventType, order);
+  if (mutedReason) {
+    return { sentCount: 0, skippedCount: 0, results: [], muted: true, reason: mutedReason };
+  }
+  if (!ALLOWED_WA_EVENTS.includes(eventType)) {
+    return { sentCount: 0, skippedCount: 0, results: [], ignored: true };
+  }
   if (typeof sendFn !== "function") {
     return { sentCount: 0, skippedCount: 0, results: [] };
   }
 
-  const orderKey = order.id || order.orderCode || order.docId || "order";
+  const actorId = actor?.uid || actor?.userId || actor?.id || actor?.email || "";
+  const actorName = actor?.name || actor?.displayName || actor?.email || "Tim";
+  const orderKey = order.id || order.orderCode || order.docId || order.title || "order";
   const dedupSignature = [
     eventType,
     orderKey,
-    order.status || "",
-    order.revisionCount || 0,
-    String(note || videoUrl || postUrl || "").slice(0, 40),
+    Number(order.revision || order.revisionCount || 0),
+    actorId,
+    String(note || videoUrl || postUrl || "").trim().slice(0, 50),
   ].join("::");
 
   if (sentNotificationKeys.has(dedupSignature)) {
@@ -205,9 +421,13 @@ export async function dispatchWorkflowWaNotifications({
   }
   sentNotificationKeys.add(dedupSignature);
 
-  const actorId = actor?.uid || actor?.userId || actor?.id || actor?.email || "";
-  const actorName = actor?.name || actor?.displayName || actor?.email || "Tim";
-  const recipients = resolveWorkflowRecipients({ eventType, order, teamMembers, actorId });
+  const recipients = resolveWorkflowRecipients({
+    eventType,
+    order,
+    teamMembers,
+    actorId,
+    actor,
+  });
 
   const results = [];
   let sentCount = 0;
@@ -223,6 +443,7 @@ export async function dispatchWorkflowWaNotifications({
       note,
       postUrl,
     });
+    if (!message) continue;
 
     try {
       await sendFn({
